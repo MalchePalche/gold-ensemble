@@ -306,20 +306,27 @@ st.markdown(f'<div class="strat-card">{strat_rows_html}</div>', unsafe_allow_htm
 st.markdown('<div class="section-header">Confidence · last 14 days</div>', unsafe_allow_html=True)
 
 hist14 = list(reversed(recent_signals(14)))  # oldest → newest
-if hist14:
-    x = [r["date"] for r in hist14]
+
+if len(hist14) < 2:
+    st.markdown(
+        "<div class='strat-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
+        "Chart will populate after 2+ days of signals</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    # X axis = date only (category axis keeps plotly from showing a timestamp).
+    x = [str(r["date"]) for r in hist14]
     y = [float(r["confidence"]) for r in hist14]
     biases = [r["bias"] for r in hist14]
 
     fig = go.Figure()
-    # Colored line segments: each segment colored by the day it arrives at.
+    # Line chart with markers; each segment colored by the day it arrives at.
     for i in range(len(x) - 1):
         fig.add_trace(go.Scatter(
             x=x[i:i + 2], y=y[i:i + 2], mode="lines",
             line=dict(color=bias_hex(biases[i + 1]), width=2),
             showlegend=False, hoverinfo="skip",
         ))
-    # Markers on top so single-point / hover still reads.
     fig.add_trace(go.Scatter(
         x=x, y=y, mode="markers",
         marker=dict(color=[bias_hex(b) for b in biases], size=6),
@@ -331,7 +338,8 @@ if hist14:
         plot_bgcolor="#111",
         height=160,
         margin=dict(l=0, r=0, t=0, b=0),
-        xaxis=dict(gridcolor="#1e1e1e", tickfont=dict(color="#888", size=11)),
+        xaxis=dict(type="category", gridcolor="#1e1e1e",
+                   tickfont=dict(color="#888", size=11)),
         yaxis=dict(gridcolor="#1e1e1e", tickfont=dict(color="#888", size=11),
                    ticksuffix="%", range=[40, 85]),
     )

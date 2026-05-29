@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Gold Ensemble V4 — Configuration template
+# Copy to config.yaml and adjust. Secrets (Supabase / Telegram) are read from
+# environment variables (.env locally, Railway dashboard in production) and
+# take precedence over anything set here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Data
+data:
+  gold_ticker: "GC=F"
+  history_years: 15
+  cache_dir: "data/cache"
+  cache_ttl_hours: 12          # re-fetch if cache older than this
+
+# ── Strategy parameters (all 4 active strategies use gold OHLCV only)
+strategies:
+  s1_ma:
+    fast: 20
+    slow: 50
+  s2_donchian:
+    lookback: 55
+    exit_lookback: 20
+  s4_52w:
+    lookback: 252
+    tolerance: 0.02
+    hold_bars: 10
+  s5_macd:
+    fast: 12
+    slow: 26
+    signal: 9
+
+# ── Ensemble weights (V3 grid-search optimised, locked for production)
+ensemble:
+  weights:
+    S1: 1.5
+    S2: 0.5
+    S4: 1.5
+    S5: 2.0
+  dead_zone: 0.05              # |score| below this → NEUTRAL
+
+# ── Volatility regime detection
+volatility:
+  atr_period: 14
+  atr_avg_period: 20
+  atr_elevated_mult: 1.5       # ATR ratio > this → elevated
+  atr_extreme_mult: 2.0        # ATR ratio > this → extreme
+  rv_period: 20                # rolling window for realized vol
+  rv_lookback: 252             # percentile rank lookback
+  rv_high_pct: 0.75            # rv percentile > this → elevated
+  rv_extreme_pct: 0.90         # rv percentile > this → extreme
+
+# ── Position sizing matrix
+sizing:
+  # BULLISH high-confidence (> conf_high_threshold)
+  bullish_high_normal:   1.5
+  bullish_high_elevated: 1.0
+  bullish_high_extreme:  0.5
+  # BULLISH base-confidence (everything else bullish)
+  bullish_base_normal:   1.0
+  bullish_base_elevated: 0.75
+  bullish_base_extreme:  0.25
+  # Other
+  neutral:               0.5
+  bearish:               0.0
+  conf_high_threshold:   60.0  # % above this = "high confidence"
+
+# ── Entry smoothing (applied by the daily runner)
+smoothing:
+  bull_confirm_bars: 2         # consecutive bullish bars before scaling in
+  scale_in_steps: [0.5, 1.0]  # intermediate sizes before full target
+  scale_out_steps: [0.5]      # intermediate sizes before 0
+  fast_exit_conf_threshold: 50.0  # % — bearish above this skips scale-out
+
+# ── Circuit breaker
+circuit_breaker:
+  lookback_bars: 20
+  return_threshold: -0.08      # 20-day portfolio return below this triggers
+  freeze_bars: 10              # bars to hold at 0x after trigger
+
+# ── Backtest
+backtest:
+  transaction_cost: 0.001
+  train_start: "2010-01-01"
+  train_end:   "2019-12-31"
+  test_start:  "2020-01-01"
+  test_end:    "2025-12-31"
+  initial_capital: 100000
+
+# ── Telegram alerts
+#   Token + chat_id come from TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars.
+telegram:
+  enabled: false               # set to true once env vars are configured
+  # Alert fires when: bias flips OR |position_change| >= size_change_threshold
+  size_change_threshold: 0.5
+
+# ── Daily runner
+runner:
+  market_close_time: "18:00"   # HH:MM local time to run after market close
+  timezone: "America/New_York"  # informational only; uses system clock

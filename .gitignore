@@ -1,0 +1,21 @@
+# Secrets & local config
+.env
+config.yaml
+
+# Data cache
+data/cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pkl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

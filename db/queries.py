@@ -42,3 +42,37 @@ def get_recent_signals(n: int = 14) -> list[dict]:
         .execute()
     )
     return res.data
+
+
+def get_evaluated_signals(limit: int = 90) -> list[dict]:
+    """The most recent signals that have already been scored.
+
+    Reads the stored forward-test columns written by
+    `data.forward_test.auto_evaluate_pending()`, so the dashboard can render
+    the live track record without recomputing returns on the fly.
+    """
+    res = (
+        supabase.table("signals")
+        .select(
+            "date, bias, confidence, next_day_return, "
+            "correct, evaluated, evaluation_date"
+        )
+        .eq("evaluated", True)
+        .order("date", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data
+
+
+def get_pending_signals() -> list[dict]:
+    """Non-neutral signals still awaiting their next-day outcome."""
+    res = (
+        supabase.table("signals")
+        .select("date, bias, confidence")
+        .eq("evaluated", False)
+        .neq("bias", "NEUTRAL")
+        .order("date", desc=True)
+        .execute()
+    )
+    return res.data

@@ -30,9 +30,11 @@ sys.path.insert(0, HERE)
 import yaml
 
 from data.loader import DataLoader
+from data.forward_test import auto_evaluate_pending
 from ensemble.model import EnsembleModel
 from ensemble.sizer import compute_vol_regime, target_size, simulate_v4
 from db.queries import save_signal, get_recent_signals
+from db.supabase_client import supabase
 
 STRAT_NAMES = {
     "S1": "MA Crossover (EMA 20/50)",
@@ -87,6 +89,22 @@ def main() -> None:
     siz_cfg  = cfg.get("sizing", {})
     cb_cfg   = cfg.get("circuit_breaker", {})
     tg_cfg   = cfg.get("telegram", {})
+
+    # ── 0. Auto-evaluate yesterday's pending signals ───────────────────────
+    # Score every un-evaluated, non-neutral signal against the actual next-day
+    # gold move and persist the result. Runs first so today's fresh signal is
+    # never mistaken for something already evaluable.
+    print("[run_daily] Evaluating pending signals...")
+    eval_result = auto_evaluate_pending(supabase)
+
+    if eval_result.get("evaluated", 0) > 0:
+        print(f"[run_daily] Evaluated {eval_result['evaluated']} signal(s):")
+        for r in eval_result.get("results", []):
+            correct_str = "✓" if r["correct"] else "✗"
+            print(f"  {correct_str} {r['date']} {r['bias']} → "
+                  f"{r['return']:+.2f}% next day")
+    else:
+        print("[run_daily] No pending signals to evaluate")
 
     # ── 1. Gold data ───────────────────────────────────────────────────────
     print("[run_daily] Fetching gold data…")

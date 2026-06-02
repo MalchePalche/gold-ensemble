@@ -93,6 +93,11 @@ telegram:
   # Alert fires when: bias flips OR |position_change| >= size_change_threshold
   size_change_threshold: 0.5
 
+# ── News sentiment
+#   Headlines are fetched from NewsAPI and scored with TextBlob. The API key is
+#   read from the NEWSAPI_KEY env var (.env locally, Railway in production).
+#   Without it, the sentiment section degrades gracefully to "neutral / no data".
+
 # ── Daily runner
 runner:
   market_close_time: "18:00"   # HH:MM local time to run after market close

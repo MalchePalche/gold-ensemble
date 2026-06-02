@@ -165,6 +165,28 @@ st.markdown(
   .corr-interp { font-size: 0.8rem; color: #888; margin-top: 0.75rem;
                  padding: 0.6rem 0.75rem; background: #161616;
                  border-radius: 6px; border-left: 2px solid #1e1e1e; }
+
+  /* news sentiment */
+  .sentiment-card { border: 1px solid #1e1e1e; border-radius: 12px;
+                    padding: 1.25rem; background: #111;
+                    margin-bottom: 1rem; }
+  .polarity-track { height: 6px; background: #1e1e1e; border-radius: 3px;
+                    position: relative; margin: 0.75rem 0; }
+  .polarity-fill-bull { height: 6px; background: #639922; border-radius: 3px; }
+  .polarity-fill-bear { height: 6px; background: #E24B4A; border-radius: 3px; }
+  .sentiment-label { font-size: 0.72rem; color: #888; }
+  .headline-item { padding: 6px 0; border-bottom: 1px solid #1a1a1a;
+                   font-size: 0.78rem; }
+  .headline-item:last-child { border-bottom: none; }
+  .headline-title { color: #e8e8e8; text-decoration: none; }
+  .headline-title:hover { color: #639922; }
+  .headline-meta { color: #888; font-size: 0.72rem; margin-top: 2px; }
+  .divergence-alert { background: #1f1a0a; border: 1px solid #BA7517;
+                      border-radius: 8px; padding: 0.75rem 1rem;
+                      color: #BA7517; font-size: 0.82rem;
+                      margin: 0.75rem 0; }
+  .sentiment-aligned { color: #639922; font-size: 0.78rem;
+                       margin: 0.5rem 0; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -216,6 +238,13 @@ def load_correlations():
     return data, summary
 
 
+@st.cache_data(ttl=1800, show_spinner=False)  # refresh every 30 min
+def load_sentiment():
+    """News sentiment over the last 24h (signal, counts, headlines)."""
+    from data.sentiment import get_sentiment
+    return get_sentiment()
+
+
 # ── load ─────────────────────────────────────────────────────────────────────
 try:
     signal = latest_signal()
@@ -241,6 +270,11 @@ try:
     corr_data, corr_summary = load_correlations()
 except Exception:
     corr_data, corr_summary = {}, "ALIGNED"
+
+try:
+    sentiment = load_sentiment()
+except Exception:
+    sentiment = None
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -546,6 +580,122 @@ st.markdown(
     f"<div class='corr-interp'>{_CORR_INTERP.get(corr_summary, '')}</div>",
     unsafe_allow_html=True,
 )
+
+
+# ── news sentiment (last 24h) ──────────────────────────────────────────────────
+import html as _html
+
+st.markdown('<div class="section-header">News sentiment</div>', unsafe_allow_html=True)
+
+if not sentiment or sentiment.get("total", 0) == 0:
+    st.markdown(
+        "<div class='sentiment-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
+        "No gold-relevant headlines in the last 24h "
+        "(or NEWSAPI_KEY not configured)</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    sig = sentiment["signal"]
+    sk = bias_key(sig)                       # bullish / bearish / neutral CSS suffix
+    sconf = float(sentiment["confidence"])
+    pol = float(sentiment["avg_polarity"])
+
+    # 1. Header + sentiment badge + confidence
+    st.markdown(
+        f"<div style='display:flex;justify-content:space-between;align-items:center;"
+        f"margin-bottom:0.75rem;'>"
+        f"<div class='sentiment-label' style='font-size:0.8rem;'>Last 24h</div>"
+        f"<div><span class='badge-{sk}'>{sig}</span>"
+        f"<span class='sentiment-label' style='margin-left:8px;'>{sconf:.0f}% conf</span></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # 2. Stats row — total / bullish / bearish
+    st.markdown(
+        f"""
+<div class="metric-grid" style="grid-template-columns: repeat(3, 1fr);">
+  <div class="metric-card">
+    <div class="metric-label">Headlines</div>
+    <div class="metric-value">{sentiment['total']}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Bullish</div>
+    <div class="metric-value metric-positive">{sentiment['bullish_count']}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Bearish</div>
+    <div class="metric-value metric-negative">{sentiment['bearish_count']}</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # 3. Polarity bar (-1 .. +1), filled from center toward the current avg.
+    pct = min(abs(pol), 1.0) * 50.0          # half-width fraction
+    if pol >= 0:
+        bar = (f"<div class='polarity-fill-bull' style='position:absolute;left:50%;"
+               f"width:{pct:.1f}%;'></div>")
+    else:
+        bar = (f"<div class='polarity-fill-bear' style='position:absolute;"
+               f"right:50%;width:{pct:.1f}%;'></div>")
+    st.markdown(
+        f"<div style='display:flex;justify-content:space-between;'>"
+        f"<span class='sentiment-label'>Bearish</span>"
+        f"<span class='sentiment-label'>avg polarity {pol:+.3f}</span>"
+        f"<span class='sentiment-label'>Bullish</span></div>"
+        f"<div class='polarity-track'>"
+        f"<div style='position:absolute;left:50%;top:-2px;width:1px;height:10px;"
+        f"background:#444;'></div>{bar}</div>",
+        unsafe_allow_html=True,
+    )
+
+    # 4. Divergence vs ensemble bias
+    from data.sentiment import divergence_check
+    div = divergence_check(sig, bias)
+    if div["message"]:
+        if div["divergence"]:
+            st.markdown(
+                f"<div class='divergence-alert'>{div['message']}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div class='sentiment-aligned'>{div['message']}</div>",
+                unsafe_allow_html=True,
+            )
+
+    # 5. Top headlines — two columns, collapsible.
+    def _headlines_html(items: list[dict]) -> str:
+        if not items:
+            return "<div class='headline-meta'>None</div>"
+        out = ""
+        for h in items:
+            title = _html.escape(h.get("title", ""))
+            url = _html.escape(h.get("url", ""), quote=True)
+            src = _html.escape(h.get("source", ""))
+            title_html = (f"<a class='headline-title' href='{url}' target='_blank'>{title}</a>"
+                          if url else f"<span class='headline-title'>{title}</span>")
+            out += (
+                f"<div class='headline-item'>{title_html}"
+                f"<div class='headline-meta'>{src} · polarity {h.get('polarity', 0):+.2f}</div>"
+                f"</div>"
+            )
+        return out
+
+    with st.expander("Top headlines", expanded=False):
+        c_bull, c_bear = st.columns(2)
+        c_bull.markdown(
+            "<div class='sentiment-label' style='margin-bottom:6px;'>📈 Most bullish</div>"
+            f"{_headlines_html(sentiment['top_bullish'])}",
+            unsafe_allow_html=True,
+        )
+        c_bear.markdown(
+            "<div class='sentiment-label' style='margin-bottom:6px;'>📉 Most bearish</div>"
+            f"{_headlines_html(sentiment['top_bearish'])}",
+            unsafe_allow_html=True,
+        )
 
 
 # ── confidence chart (last 14 days) ────────────────────────────────────────────

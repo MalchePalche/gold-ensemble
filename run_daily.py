@@ -235,12 +235,31 @@ def main() -> None:
     except Exception as e:
         print(f"\n  Correlation monitor unavailable: {e}")
 
+    # ── News sentiment (last 24h) ───────────────────────────────────────────
+    sentiment   = None
+    sent_diverge = False
+    try:
+        from data.sentiment import get_sentiment, divergence_check
+        sentiment = get_sentiment()
+        div = divergence_check(sentiment["signal"], bias_str)
+        sent_diverge = div["divergence"]
+        print(f"\n  Sentiment: {sentiment['signal']} ({sentiment['confidence']}%) — "
+              f"{sentiment['bullish_count']} bullish, "
+              f"{sentiment['bearish_count']} bearish, "
+              f"{sentiment['neutral_count']} neutral headlines")
+        if sent_diverge:
+            print(f"  DIVERGENCE: News {sentiment['signal']} vs Ensemble {bias_str} "
+                  f"— watch for reversal in 1-3 days")
+    except Exception as e:
+        print(f"\n  News sentiment unavailable: {e}")
+
     # ── 8. Telegram alert ──────────────────────────────────────────────────
     size_thresh  = tg_cfg.get("size_change_threshold", 0.5)
     corr_alert   = corr_summary == "BREAKDOWN"
+    sent_alert   = sent_diverge
     should_alert = (
         tg_cfg.get("enabled", False) and
-        (bias_flip or abs(pos_change) >= size_thresh or corr_alert)
+        (bias_flip or abs(pos_change) >= size_thresh or corr_alert or sent_alert)
     )
 
     if should_alert:
@@ -268,6 +287,11 @@ def main() -> None:
                 lines.append("⚠️ Correlation breakdown detected — regime change possible")
                 for v in corr_breaks:
                     lines.append(f"  {v['label']}: {v['breakdown_msg']}")
+            if sent_alert and sentiment is not None:
+                lines.append("")
+                lines.append(f"⚡ SENTIMENT DIVERGENCE: News {sentiment['signal']} "
+                             f"vs Ensemble {bias_str}")
+                lines.append("Price often follows sentiment within 1-3 days")
             _send_telegram(bot_token, chat_id, "\n".join(lines))
         else:
             print("[telegram] Alert triggered but bot_token/chat_id not configured.")

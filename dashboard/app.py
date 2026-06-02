@@ -450,6 +450,19 @@ else:
     c_lon.markdown(_session_card("London", sess.get("london")), unsafe_allow_html=True)
     c_ny.markdown(_session_card("NY", sess.get("ny")), unsafe_allow_html=True)
 
+    ticker_used = intraday.get("ticker")
+    if ticker_used:
+        label = {"XAUUSD=X": "XAU/USD spot", "GC=F": "GC=F futures",
+                 "MGC=F": "MGC=F micro futures", "GLD": "GLD ETF"}.get(
+                     ticker_used, ticker_used)
+        premium = intraday.get("spot_premium") or 0.0
+        offset_txt = f", −${premium:.0f} spot offset" if premium else ""
+        st.markdown(
+            f"<div style='color:#555;font-size:0.72rem;margin:2px 0 0.75rem 0;'>"
+            f"Intraday data: {label} ({ticker_used}){offset_txt}</div>",
+            unsafe_allow_html=True,
+        )
+
     # 3. Price action strip — single row.
     if pa:
         current = pa.get("current")

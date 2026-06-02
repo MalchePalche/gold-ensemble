@@ -208,6 +208,18 @@ def main() -> None:
         print(f"  {k:<8}  {arrow}  {cv:>6.3f}  {STRAT_NAMES.get(k, k)}")
     print("=" * 62)
 
+    # ── Economic calendar (high-impact USD events) ──────────────────────────
+    try:
+        from data.calendar import get_todays_events, event_risk_score
+        today_events = get_todays_events()
+        risk = event_risk_score(today_events)
+        print(f"\n  Economic risk today: {risk}")
+        if today_events:
+            for e in today_events:
+                print(f"  {e['time_sofia']} Sofia — {e['title']}")
+    except Exception as e:
+        print(f"\n  Economic calendar unavailable: {e}")
+
     # ── 8. Telegram alert ──────────────────────────────────────────────────
     size_thresh  = tg_cfg.get("size_change_threshold", 0.5)
     should_alert = (

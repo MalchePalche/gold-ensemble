@@ -124,6 +124,28 @@ st.markdown(
   .price-negative { color: #E24B4A; font-size: 0.85rem; }
   .live-dot { display: inline-block; width: 8px; height: 8px; background: #639922;
               border-radius: 50%; margin-right: 4px; }
+
+  /* economic calendar */
+  .risk-high { background: #2a1010; border: 1px solid #E24B4A; border-radius: 8px;
+               padding: 0.75rem 1rem; color: #E24B4A; font-size: 0.85rem;
+               margin-bottom: 1rem; }
+  .risk-medium { background: #1f1a0a; border: 1px solid #BA7517; border-radius: 8px;
+                 padding: 0.75rem 1rem; color: #BA7517; font-size: 0.85rem;
+                 margin-bottom: 1rem; }
+  .next-event { font-size: 0.78rem; color: #888; margin-top: 0.5rem;
+                margin-bottom: 1rem; }
+  .next-event span { color: #e8e8e8; }
+  .cal-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .cal-table th { color: #888; text-transform: uppercase; font-size: 0.7rem;
+                  letter-spacing: 0.05em; text-align: left; padding: 6px 10px;
+                  border-bottom: 1px solid #1e1e1e; font-weight: 500; }
+  .cal-table td { padding: 7px 10px; border-bottom: 1px solid #1a1a1a; }
+  .cal-row-today td { background: #181818; }
+  .cal-row-past td { color: #5a5a5a; }
+  .cal-row-future td { color: #e8e8e8; }
+  .cal-actual-better { color: #639922; }
+  .cal-actual-worse { color: #E24B4A; }
+  .cal-actual-pending { color: #888; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -150,6 +172,22 @@ def live_price() -> float | None:
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)  # refresh hourly
+def load_calendar():
+    """This week's high-impact USD calendar (week, today, next, risk)."""
+    from data.calendar import (
+        get_week_events,
+        get_todays_events,
+        get_next_event,
+        event_risk_score,
+    )
+    week = get_week_events()
+    today = get_todays_events()
+    next_evt = get_next_event()
+    risk = event_risk_score(today)
+    return week, today, next_evt, risk
+
+
 # ── load ─────────────────────────────────────────────────────────────────────
 try:
     signal = latest_signal()
@@ -165,6 +203,11 @@ if not signal:
 bias         = signal["bias"]
 stored_price = float(signal["price"]) if signal.get("price") is not None else None
 price_now    = live_price()
+
+try:
+    week_events, today_events, next_event, risk_score = load_calendar()
+except Exception:
+    week_events, today_events, next_event, risk_score = [], [], None, "LOW"
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -238,6 +281,40 @@ st.markdown(
 )
 
 
+# ── next event countdown (under the signal card) ───────────────────────────────
+if next_event is not None:
+    now_utc = datetime.now(next_event["datetime_utc"].tzinfo)
+    delta = next_event["datetime_utc"] - now_utc
+    total_min = max(int(delta.total_seconds() // 60), 0)
+    hrs, mins = divmod(total_min, 60)
+    when = f"{hrs}h {mins}m" if hrs else f"{mins}m"
+    st.markdown(
+        f"<div class='next-event'>Next: <span>{next_event['title']}</span> "
+        f"in <span>{when}</span> · {next_event['time_sofia']} Sofia</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        "<div class='next-event'>No high-impact events remaining this week</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ── risk banner (full width, above everything below the signal card) ───────────
+if risk_score in ("HIGH", "MEDIUM"):
+    titles = " · ".join(e["title"] for e in today_events)
+    if risk_score == "HIGH":
+        st.markdown(
+            f"<div class='risk-high'>⚠️ HIGH IMPACT EVENT TODAY — {titles}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"<div class='risk-medium'>📅 Market event today — {titles}</div>",
+            unsafe_allow_html=True,
+        )
+
+
 # ── metrics row ────────────────────────────────────────────────────────────────
 vol = str(signal.get("vol_regime") or "—")
 vol_cls = {"normal": "metric-neutral", "elevated": "metric-amber", "extreme": "metric-negative"}.get(vol, "metric-neutral")
@@ -300,6 +377,80 @@ for k in strat_keys:
         f"</div>"
     )
 st.markdown(f'<div class="strat-card">{strat_rows_html}</div>', unsafe_allow_html=True)
+
+
+# ── economic calendar (this week) ──────────────────────────────────────────────
+def _to_float(v: str) -> float | None:
+    """Parse a Forex Factory numeric string (e.g. '116K', '0.3%', '4.3%')."""
+    if not v:
+        return None
+    s = str(v).strip().replace("%", "").replace(",", "").replace("$", "")
+    mult = 1.0
+    if s and s[-1].upper() in ("K", "M", "B", "T"):
+        mult = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[s[-1].upper()]
+        s = s[:-1]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return None
+
+
+def _actual_cell(ev: dict) -> str:
+    """Actual value cell: green if beats forecast, red if misses, gray if pending."""
+    actual = ev.get("actual", "")
+    if not actual:
+        return "<span class='cal-actual-pending'>—</span>"
+    a, f = _to_float(actual), _to_float(ev.get("forecast", ""))
+    if a is None or f is None or a == f:
+        cls = "cal-actual-pending"
+    elif a > f:
+        cls = "cal-actual-better"
+    else:
+        cls = "cal-actual-worse"
+    return f"<span class='{cls}'>{actual}</span>"
+
+
+st.markdown('<div class="section-header">Economic calendar</div>', unsafe_allow_html=True)
+
+with st.expander("This week · high-impact USD events", expanded=False):
+    if not week_events:
+        st.markdown(
+            "<div style='color:#888;font-size:0.85rem;'>Calendar unavailable.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        today = datetime.now().date()
+        now_utc = datetime.now(week_events[0]["datetime_utc"].tzinfo)
+        rows_html = ""
+        for ev in week_events:
+            if ev["date"] == today:
+                row_cls = "cal-row-today"
+            elif ev["datetime_utc"] < now_utc:
+                row_cls = "cal-row-past"
+            else:
+                row_cls = "cal-row-future"
+            day = ev["datetime_sofia"].strftime("%a %b %d")
+            forecast = ev.get("forecast") or "—"
+            previous = ev.get("previous") or "—"
+            rows_html += (
+                f"<tr class='{row_cls}'>"
+                f"<td>{day}</td>"
+                f"<td>{ev['time_sofia']}</td>"
+                f"<td>{ev['title']}</td>"
+                f"<td>{forecast}</td>"
+                f"<td>{previous}</td>"
+                f"<td>{_actual_cell(ev)}</td>"
+                f"</tr>"
+            )
+        st.markdown(
+            "<table class='cal-table'>"
+            "<thead><tr>"
+            "<th>Day</th><th>Time (Sofia)</th><th>Event</th>"
+            "<th>Forecast</th><th>Previous</th><th>Actual</th>"
+            "</tr></thead>"
+            f"<tbody>{rows_html}</tbody></table>",
+            unsafe_allow_html=True,
+        )
 
 
 # ── confidence chart (last 14 days) ────────────────────────────────────────────

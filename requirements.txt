@@ -9,3 +9,4 @@ flask>=2.3.0
 supabase
 python-dotenv
 streamlit-autorefresh
+pytz

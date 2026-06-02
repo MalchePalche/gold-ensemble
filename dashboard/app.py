@@ -187,6 +187,27 @@ st.markdown(
                       margin: 0.75rem 0; }
   .sentiment-aligned { color: #639922; font-size: 0.78rem;
                        margin: 0.5rem 0; }
+
+  /* intraday confirmation */
+  .confirm-enter { background: #0f1f08; border: 1px solid #639922;
+                   border-radius: 8px; padding: 0.9rem 1rem;
+                   color: #639922; margin-bottom: 1rem; }
+  .confirm-wait { background: #1f1a0a; border: 1px solid #BA7517;
+                  border-radius: 8px; padding: 0.9rem 1rem;
+                  color: #BA7517; margin-bottom: 1rem; }
+  .confirm-against { background: #2a1010; border: 1px solid #E24B4A;
+                     border-radius: 8px; padding: 0.9rem 1rem;
+                     color: #E24B4A; margin-bottom: 1rem; }
+  .confirm-reason { font-size: 0.85rem; font-weight: 500; }
+  .confirm-sub { font-size: 0.78rem; margin-top: 4px; opacity: 0.8; }
+  .session-card { background: #161616; border-radius: 8px;
+                  padding: 0.9rem; border: 1px solid #1e1e1e; }
+  .session-label { font-size: 0.72rem; color: #888; text-transform: uppercase;
+                   letter-spacing: 0.05em; margin-bottom: 6px; }
+  .session-levels { font-size: 0.82rem; color: #e8e8e8; }
+  .price-strip { display: flex; gap: 1.5rem; font-size: 0.8rem;
+                 color: #888; padding: 0.6rem 0; }
+  .price-strip span { color: #e8e8e8; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -245,6 +266,13 @@ def load_sentiment():
     return get_sentiment()
 
 
+@st.cache_data(ttl=60, show_spinner=False)  # refresh every 60 seconds
+def load_intraday(bias: str):
+    """Intraday confirmation layer: session levels, price action, ENTER/WAIT/AGAINST."""
+    from data.intraday import get_intraday_analysis
+    return get_intraday_analysis(bias)
+
+
 # ── load ─────────────────────────────────────────────────────────────────────
 try:
     signal = latest_signal()
@@ -275,6 +303,11 @@ try:
     sentiment = load_sentiment()
 except Exception:
     sentiment = None
+
+try:
+    intraday = load_intraday(bias)
+except Exception as e:
+    intraday = {"error": str(e)}
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -346,6 +379,101 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+
+# ── intraday confirmation (most actionable — directly under the signal card) ───
+st.markdown('<div class="section-header">Intraday confirmation</div>', unsafe_allow_html=True)
+
+if not intraday or intraday.get("error"):
+    err = (intraday or {}).get("error") or "Intraday data unavailable"
+    st.markdown(
+        f"<div class='session-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
+        f"Intraday layer unavailable — {err}</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    confirm = intraday.get("confirmation") or {}
+    pa = intraday.get("price_action") or {}
+    sess = intraday.get("levels") or {}
+
+    # 1. Confirmation banner — full width.
+    sig = confirm.get("signal", "WAIT")
+    reason = confirm.get("reason", "")
+    if sig == "ENTER":
+        zone = confirm.get("entry_zone")
+        sub = f"Entry zone: {zone}" if zone else ""
+        st.markdown(
+            f"<div class='confirm-enter'>"
+            f"<div class='confirm-reason'>✅ ENTRY CONFIRMED — {reason}</div>"
+            + (f"<div class='confirm-sub'>{sub}</div>" if sub else "")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+    elif sig == "AGAINST":
+        st.markdown(
+            f"<div class='confirm-against'>"
+            f"<div class='confirm-reason'>🚫 PRICE ACTING AGAINST BIAS — {reason}</div>"
+            f"<div class='confirm-sub'>Do not enter until price returns to "
+            f"bias direction</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:  # WAIT
+        key_level = confirm.get("key_level")
+        sub = f"Watching: ${key_level}" if key_level is not None else ""
+        st.markdown(
+            f"<div class='confirm-wait'>"
+            f"<div class='confirm-reason'>⏳ WAITING FOR CONFIRMATION — {reason}</div>"
+            + (f"<div class='confirm-sub'>{sub}</div>" if sub else "")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+    # 2. Session levels row — London + NY, side by side.
+    def _session_card(label: str, lv: dict | None) -> str:
+        if not lv:
+            return (
+                f"<div class='session-card' style='opacity:0.45;'>"
+                f"<div class='session-label'>{label} session</div>"
+                f"<div class='session-levels'>Not active yet today</div>"
+                f"</div>"
+            )
+        return (
+            f"<div class='session-card'>"
+            f"<div class='session-label'>{label} session</div>"
+            f"<div class='session-levels'>High <b>${lv['high']:,.2f}</b> · "
+            f"Low <b>${lv['low']:,.2f}</b> · Range <b>${lv['range']:,.2f}</b></div>"
+            f"</div>"
+        )
+
+    c_lon, c_ny = st.columns(2)
+    c_lon.markdown(_session_card("London", sess.get("london")), unsafe_allow_html=True)
+    c_ny.markdown(_session_card("NY", sess.get("ny")), unsafe_allow_html=True)
+
+    # 3. Price action strip — single row.
+    if pa:
+        current = pa.get("current")
+        change = pa.get("change_5m", 0.0)
+        slope = pa.get("ema9_slope", 0.0)
+        vol_ratio = pa.get("vol_ratio", 1.0)
+
+        if slope > 0.05:
+            slope_txt = "↑ positive"
+        elif slope < -0.05:
+            slope_txt = "↓ negative"
+        else:
+            slope_txt = "→ flat"
+
+        chg_sign = f"{change:+,.2f}"
+        st.markdown(
+            f"<div class='price-strip'>"
+            f"Current: <span>${current:,.2f}</span>"
+            f"5m change: <span>${chg_sign}</span>"
+            f"EMA9 slope: <span>{slope_txt}</span>"
+            f"Volume: <span>{vol_ratio:.1f}x avg</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 
 # ── next event countdown (under the signal card) ───────────────────────────────

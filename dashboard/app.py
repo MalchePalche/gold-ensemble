@@ -146,6 +146,25 @@ st.markdown(
   .cal-actual-better { color: #639922; }
   .cal-actual-worse { color: #E24B4A; }
   .cal-actual-pending { color: #888; }
+
+  /* correlation monitor */
+  .corr-card { background: #161616; border-radius: 8px; padding: 0.9rem;
+               border: 1px solid #1e1e1e; }
+  .corr-card.breakdown { border: 1px solid #BA7517; background: #1a160a; }
+  .corr-label { font-size: 0.72rem; color: #888; text-transform: uppercase;
+                letter-spacing: 0.05em; }
+  .corr-price { font-size: 1rem; font-weight: 500; color: #e8e8e8; margin: 4px 0; }
+  .corr-stat { font-size: 0.75rem; color: #888; }
+  .corr-breakdown-msg { font-size: 0.72rem; color: #BA7517; margin-top: 4px; }
+  .badge-aligned { background: #0f1f08; color: #639922; font-size: 0.75rem;
+                   padding: 3px 10px; border-radius: 20px; }
+  .badge-mixed { background: #1f1a0a; color: #BA7517; font-size: 0.75rem;
+                 padding: 3px 10px; border-radius: 20px; }
+  .badge-breakdown { background: #2a1010; color: #E24B4A; font-size: 0.75rem;
+                     padding: 3px 10px; border-radius: 20px; }
+  .corr-interp { font-size: 0.8rem; color: #888; margin-top: 0.75rem;
+                 padding: 0.6rem 0.75rem; background: #161616;
+                 border-radius: 6px; border-left: 2px solid #1e1e1e; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -188,6 +207,15 @@ def load_calendar():
     return week, today, next_evt, risk
 
 
+@st.cache_data(ttl=300, show_spinner=False)  # refresh every 5 min
+def load_correlations():
+    """Gold-vs-asset correlation data + overall health summary."""
+    from data.correlations import fetch_correlations, correlation_summary
+    data = fetch_correlations()
+    summary = correlation_summary(data)
+    return data, summary
+
+
 # ── load ─────────────────────────────────────────────────────────────────────
 try:
     signal = latest_signal()
@@ -208,6 +236,11 @@ try:
     week_events, today_events, next_event, risk_score = load_calendar()
 except Exception:
     week_events, today_events, next_event, risk_score = [], [], None, "LOW"
+
+try:
+    corr_data, corr_summary = load_correlations()
+except Exception:
+    corr_data, corr_summary = {}, "ALIGNED"
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -451,6 +484,68 @@ with st.expander("This week · high-impact USD events", expanded=False):
             f"<tbody>{rows_html}</tbody></table>",
             unsafe_allow_html=True,
         )
+
+
+# ── correlation monitor ────────────────────────────────────────────────────────
+_CORR_BADGE = {"ALIGNED": "aligned", "MIXED": "mixed", "BREAKDOWN": "breakdown"}
+_CORR_BADGE_TXT = {
+    "ALIGNED": "ALIGNED",
+    "MIXED": "MIXED",
+    "BREAKDOWN": "⚠️ BREAKDOWN",
+}
+_CORR_INTERP = {
+    "ALIGNED": "All major correlations holding. Macro context supports signal.",
+    "MIXED": "Some correlation breakdowns detected. Verify signal with context.",
+    "BREAKDOWN": "⚠️ Multiple correlation breakdowns. Regime change possible — "
+                 "reduce confidence in ensemble signal.",
+}
+
+badge_cls = _CORR_BADGE.get(corr_summary, "aligned")
+st.markdown(
+    f"<div style='display:flex;justify-content:space-between;align-items:center;"
+    f"margin-bottom:0.75rem;'>"
+    f"<div class='section-header' style='margin-bottom:0;'>Correlation monitor</div>"
+    f"<div class='badge-{badge_cls}'>{_CORR_BADGE_TXT.get(corr_summary, corr_summary)}</div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+if not corr_data:
+    st.markdown(
+        "<div class='strat-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
+        "Correlation data unavailable</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    # 6 cards in 2 rows of 3 (Streamlit columns).
+    items = list(corr_data.values())
+    for row_start in range(0, len(items), 3):
+        cols = st.columns(3)
+        for col, v in zip(cols, items[row_start:row_start + 3]):
+            chg = v["change_pct"]
+            chg_cls = "price-positive" if chg >= 0 else "price-negative"
+            card_cls = "corr-card breakdown" if v["breakdown"] else "corr-card"
+            msg_html = (
+                f"<div class='corr-breakdown-msg'>{v['breakdown_msg']}</div>"
+                if v["breakdown"] else ""
+            )
+            col.markdown(
+                f"<div class='{card_cls}'>"
+                f"<div class='corr-label'>{v['label']}</div>"
+                f"<div class='corr-price'>{v['current']:,.2f} "
+                f"<span class='{chg_cls}' style='font-size:0.8rem;'>{chg:+.2f}%</span></div>"
+                f"<div class='corr-stat'>30d: {v['corr_30d']:+.2f}</div>"
+                f"<div class='corr-stat'>5d: {v['corr_5d']:+.2f}</div>"
+                f"<div class='corr-stat'>normally {v['normal']}</div>"
+                f"{msg_html}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+st.markdown(
+    f"<div class='corr-interp'>{_CORR_INTERP.get(corr_summary, '')}</div>",
+    unsafe_allow_html=True,
+)
 
 
 # ── confidence chart (last 14 days) ────────────────────────────────────────────

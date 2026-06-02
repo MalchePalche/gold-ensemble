@@ -220,11 +220,27 @@ def main() -> None:
     except Exception as e:
         print(f"\n  Economic calendar unavailable: {e}")
 
+    # ── Correlation monitor (gold vs key assets) ────────────────────────────
+    corr_summary = "ALIGNED"
+    corr_breaks  = []
+    try:
+        from data.correlations import fetch_correlations, correlation_summary
+        corr_data    = fetch_correlations()
+        corr_summary = correlation_summary(corr_data)
+        corr_breaks  = [v for v in corr_data.values() if v["breakdown"]]
+        print(f"\n  Correlation health: {corr_summary}")
+        for v in corr_breaks:
+            print(f"  {v['label']}: {v['breakdown_msg']} "
+                  f"(30d {v['corr_30d']:+.2f}, 5d {v['corr_5d']:+.2f})")
+    except Exception as e:
+        print(f"\n  Correlation monitor unavailable: {e}")
+
     # ── 8. Telegram alert ──────────────────────────────────────────────────
     size_thresh  = tg_cfg.get("size_change_threshold", 0.5)
+    corr_alert   = corr_summary == "BREAKDOWN"
     should_alert = (
         tg_cfg.get("enabled", False) and
-        (bias_flip or abs(pos_change) >= size_thresh)
+        (bias_flip or abs(pos_change) >= size_thresh or corr_alert)
     )
 
     if should_alert:
@@ -247,6 +263,11 @@ def main() -> None:
             ]
             if cb_active:
                 lines.append("Circuit breaker ACTIVE")
+            if corr_alert:
+                lines.append("")
+                lines.append("⚠️ Correlation breakdown detected — regime change possible")
+                for v in corr_breaks:
+                    lines.append(f"  {v['label']}: {v['breakdown_msg']}")
             _send_telegram(bot_token, chat_id, "\n".join(lines))
         else:
             print("[telegram] Alert triggered but bot_token/chat_id not configured.")

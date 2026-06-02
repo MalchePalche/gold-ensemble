@@ -588,12 +588,12 @@ import html as _html
 st.markdown('<div class="section-header">News sentiment</div>', unsafe_allow_html=True)
 
 if not sentiment or sentiment.get("total", 0) == 0:
-    st.markdown(
-        "<div class='sentiment-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
-        "No gold-relevant headlines in the last 48h "
-        "(or NEWSAPI_KEY not configured)</div>",
-        unsafe_allow_html=True,
-    )
+    raw_n = sentiment.get("raw_count", 0) if sentiment else 0
+    msg = (sentiment.get("no_data_msg") if sentiment else None) \
+        or "No gold-relevant headlines found (or NEWSAPI_KEY not configured)"
+    if raw_n:
+        msg += f" · {raw_n} headlines fetched but none passed the relevance filter"
+    st.info(msg)
 else:
     sig = sentiment["signal"]
     sk = bias_key(sig)                       # bullish / bearish / neutral CSS suffix
@@ -608,6 +608,15 @@ else:
         f"<div><span class='badge-{sk}'>{sig}</span>"
         f"<span class='sentiment-label' style='margin-left:8px;'>{sconf:.0f}% conf</span></div>"
         f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Sub-line: how many relevant headlines were analyzed vs raw fetch.
+    raw_n = sentiment.get("raw_count", sentiment["total"])
+    st.markdown(
+        f"<div class='sentiment-label' style='margin:-0.25rem 0 0.75rem 0;'>"
+        f"Analyzed {sentiment['total']} relevant headlines "
+        f"(filtered from {raw_n} fetched)</div>",
         unsafe_allow_html=True,
     )
 
@@ -679,7 +688,8 @@ else:
                           if url else f"<span class='headline-title'>{title}</span>")
             out += (
                 f"<div class='headline-item'>{title_html}"
-                f"<div class='headline-meta'>{src} · polarity {h.get('polarity', 0):+.2f}</div>"
+                f"<div class='headline-meta'>{src} · polarity {h.get('polarity', 0):+.2f}"
+                f" · rel {h.get('relevance', 0):.1f}</div>"
                 f"</div>"
             )
         return out

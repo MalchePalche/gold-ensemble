@@ -1,10 +1,11 @@
 """
 data/sentiment.py — news sentiment analysis for gold.
 
-Pulls gold-relevant headlines from NewsAPI (last 24h), scores each with
-TextBlob polarity, and rolls them into a BULLISH/BEARISH/NEUTRAL sentiment
-signal. Also flags divergence between news sentiment and the ensemble bias —
-a high-value tell that price may reverse within a few days.
+Pulls gold-relevant headlines from NewsAPI (last 48h), filters them down to
+genuine gold-commodity stories, scores each with TextBlob polarity weighted by
+relevance, and rolls them into a BULLISH/BEARISH/NEUTRAL sentiment signal. Also
+flags divergence between news sentiment and the ensemble bias — a high-value
+tell that price may reverse within a few days.
 
 Requires the NEWSAPI_KEY environment variable. If it is missing or the call
 fails, every entry point degrades gracefully to an empty/neutral result.
@@ -13,7 +14,6 @@ fails, every entry point degrades gracefully to an empty/neutral result.
 from __future__ import annotations
 
 import os
-import re
 from datetime import datetime, timedelta
 
 import pytz
@@ -23,56 +23,65 @@ from textblob import TextBlob
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 SOFIA_TZ = pytz.timezone("Europe/Sofia")
 
-GOLD_QUERIES = [
-    "gold price", "XAU USD", "gold trading",
-    "gold rally", "gold selloff", "Federal Reserve gold",
-    "inflation gold", "gold futures",
+# Commodity-context keywords. A headline must contain at least one of these to
+# count as gold-relevant; the more it contains, the higher its relevance weight.
+COMMODITY_KEYWORDS = [
+    "xau", "gold price", "spot gold", "gold futures", "gold rally",
+    "gold selloff", "gold demand", "gold reserves", "gold trading",
+    "gold surges", "gold drops", "gold climbs", "gold falls",
+    "gold hits", "gold bulls", "gold bears", "bullion",
+    "precious metal", "comex gold", "gold ounce", "per ounce",
+    "federal reserve", "fed rate", "inflation", "dollar index",
+    "treasury yield", "safe haven", "risk off", "central bank",
 ]
 
-# The title must mention gold as a whole word (so "golden", "Goldman",
-# "Goldberg" don't match). XAU / bullion also qualify.
-_GOLD_TITLE_RE = re.compile(r"\b(gold|xau|bullion)\b", re.IGNORECASE)
-
-# A headline only counts as gold-relevant if it also reads like a markets
-# story — at least one of these context words must appear in title+description.
-_MARKET_CONTEXT = (
-    "price", "prices", "futures", "rally", "rallies", "selloff", "sell-off",
-    "ounce", "spot", "fed", "federal reserve", "inflation", "dollar", "yield",
-    "yields", "safe haven", "safe-haven", "trading", "trade", "market",
-    "markets", "troy", "investor", "rate", "rates", "hedge", "usd", "etf",
-    "comex", "bullion", "central bank", "demand", "tola", "10g", "10 gms",
-)
-
-# Common non-financial / commercial uses of "gold" to throw out (sports,
-# entertainment, product names, retail deals, "liquid gold" metaphors, etc).
-_NOISE_TOKENS = (
-    "gold medal", "gold medals", "medalist", "medallist", "olympic", "olympics",
-    "world cup", "trophy", "tournament", "champion", "championship", "league",
-    "wrestler", "wrestling", "rugby", "football", "soccer", "cricket", "tennis",
-    "anime", "movie", "album", "song", "netflix", "box office", "gold coast",
-    "goldfish", "gold rush", "gold star", "pokemon", "pokémon",
-    "gold label", "80+ gold", "rrp", "whisky", "whiskey", "scotch", "psu",
-    "delivered @", "liquid gold", "colostrum",
-)
+# Hard-block phrases — non-commodity uses of "gold" (sports, entertainment …).
+IRRELEVANT_KEYWORDS = [
+    "gold medal", "golden globe", "gold award", "gold album",
+    "gold record", "gold coast", "heart of gold", "gold mining stock",
+    "olympic gold", "gold trophy", "gold standard test",
+    "bachelor gold", "age of gold",
+]
 
 
-def _is_gold_relevant(title: str, text: str) -> bool:
-    """True only for headlines that are about gold-the-asset, not 'gold medal'."""
-    if not _GOLD_TITLE_RE.search(title):
+def is_relevant(headline: dict) -> bool:
+    """
+    Returns True only if headline is clearly about gold commodity.
+    Checks title + description for commodity keywords.
+    Filters out known irrelevant patterns.
+    """
+    text = headline["text"].lower()
+
+    # Hard filter — if irrelevant keyword present, skip
+    if any(kw in text for kw in IRRELEVANT_KEYWORDS):
         return False
-    low = text.lower()
-    if any(tok in low for tok in _NOISE_TOKENS):
+
+    # Must contain at least one commodity keyword
+    if not any(kw in text for kw in COMMODITY_KEYWORDS):
         return False
-    return any(ctx in low for ctx in _MARKET_CONTEXT)
+
+    return True
+
+
+def relevance_score(headline: dict) -> float:
+    """
+    Score 0.0-1.0 how relevant the headline is to gold trading.
+    Used to weight the sentiment score.
+    More commodity keywords = higher weight in final avg.
+    """
+    text = headline["text"].lower()
+    hits = sum(1 for kw in COMMODITY_KEYWORDS if kw in text)
+    return min(1.0, hits / 3)  # 3+ keywords = full weight
 
 
 def fetch_headlines(hours_back: int = 48) -> list[dict]:
     """
-    Fetch gold-relevant headlines from the last `hours_back` hours.
+    Fetch candidate gold headlines from the last `hours_back` hours.
 
-    Requires "gold"/XAU/bullion in the article title (NewsAPI qInTitle), then
-    applies a local relevance filter to keep only genuine markets stories.
-    Returns list of dicts with title, source, published, url.
+    Uses a strict boolean NewsAPI query (gold-commodity phrases, with sports/
+    entertainment uses excluded). Returns the raw matched set; relevance
+    filtering + weighting happens in score_sentiment().
+    Returns list of dicts with title, source, published, url, text.
     """
     if not NEWSAPI_KEY:
         return []
@@ -80,11 +89,22 @@ def fetch_headlines(hours_back: int = 48) -> list[dict]:
     from_time = (datetime.utcnow() - timedelta(hours=hours_back))\
                 .strftime("%Y-%m-%dT%H:%M:%S")
 
+    query = (
+        '("gold price" OR "XAU" OR "gold futures" OR "gold rally" '
+        'OR "gold selloff" OR "gold demand" OR "gold reserves" '
+        'OR "gold trading" OR "spot gold" OR "gold bulls" '
+        'OR "gold bears" OR "gold hits" OR "gold surges" '
+        'OR "gold drops" OR "gold climbs" OR "gold falls") '
+        'AND NOT ("gold medal" OR "gold award" OR "gold record" '
+        'OR "golden globe" OR "gold album" OR "gold standard test" '
+        'OR "heart of gold" OR "gold coast" OR "gold mining stock")'
+    )
+
     try:
         r = requests.get(
             "https://newsapi.org/v2/everything",
             params={
-                "qInTitle": "gold OR XAU OR bullion",
+                "q": query,
                 "from": from_time,
                 "language": "en",
                 "sortBy": "publishedAt",
@@ -104,50 +124,64 @@ def fetch_headlines(hours_back: int = 48) -> list[dict]:
         description = a.get("description", "") or ""
         if not title:
             continue
-        text = f"{title}. {description}"
-        if not _is_gold_relevant(title, text):
-            continue
         results.append({
             "title": title,
             "description": description,
             "source": a.get("source", {}).get("name", ""),
             "published": a.get("publishedAt", ""),
             "url": a.get("url", ""),
-            "text": text,
+            "text": f"{title}. {description}",
         })
 
     return results
 
 
+def _neutral_result(raw_count: int = 0) -> dict:
+    """Empty/neutral sentiment payload (no relevant headlines)."""
+    return {
+        "avg_polarity": 0,
+        "signal": "NEUTRAL",
+        "confidence": 0,
+        "bullish_count": 0,
+        "bearish_count": 0,
+        "neutral_count": 0,
+        "scores": [],
+        "top_bullish": [],
+        "top_bearish": [],
+        "total": 0,
+        "raw_count": raw_count,
+        "no_data_msg": "No relevant gold headlines found in last 48h",
+    }
+
+
 def score_sentiment(headlines: list[dict]) -> dict:
     """
-    Score each headline with TextBlob polarity.
-    Polarity: -1.0 (very negative) to +1.0 (very positive)
+    Filter headlines to gold-commodity stories, then score each with TextBlob
+    polarity weighted by relevance. Polarity: -1.0 (very negative) to +1.0.
 
-    Returns a dict with avg_polarity, signal, confidence, per-sentiment
-    counts, the scored headlines, and the top 3 bullish/bearish headlines.
+    Returns a dict with avg_polarity (relevance-weighted), signal, confidence,
+    per-sentiment counts, the scored headlines (each with a relevance score),
+    and the top 3 bullish/bearish headlines. raw_count is the pre-filter fetch
+    size so the UI can show "filtered from raw fetch".
     """
-    if not headlines:
-        return {
-            "avg_polarity": 0,
-            "signal": "NEUTRAL",
-            "confidence": 0,
-            "bullish_count": 0,
-            "bearish_count": 0,
-            "neutral_count": 0,
-            "scores": [],
-            "top_bullish": [],
-            "top_bearish": [],
-            "total": 0,
-        }
+    raw_count = len(headlines)
 
+    # 1. Keep only headlines clearly about the gold commodity.
+    headlines = [h for h in headlines if is_relevant(h)]
+    if not headlines:
+        return _neutral_result(raw_count)
+
+    # 2. Score + relevance-weight each headline.
     scores = []
     for h in headlines:
         blob = TextBlob(h["text"])
         polarity = blob.sentiment.polarity
+        weight = relevance_score(h)
         scores.append({
             **h,
             "polarity": round(polarity, 3),
+            "weight": round(weight, 3),
+            "relevance": round(weight, 2),   # for display
             "sentiment": "bullish" if polarity > 0.05
                          else "bearish" if polarity < -0.05
                          else "neutral",
@@ -157,7 +191,12 @@ def score_sentiment(headlines: list[dict]) -> dict:
     bearish = [s for s in scores if s["sentiment"] == "bearish"]
     neutral = [s for s in scores if s["sentiment"] == "neutral"]
 
-    avg_polarity = sum(s["polarity"] for s in scores) / len(scores)
+    # 3. Relevance-weighted average polarity.
+    total_weight = sum(s["weight"] for s in scores)
+    if total_weight > 0:
+        avg_polarity = sum(s["polarity"] * s["weight"] for s in scores) / total_weight
+    else:
+        avg_polarity = 0
 
     # Signal
     if avg_polarity > 0.05:
@@ -170,7 +209,7 @@ def score_sentiment(headlines: list[dict]) -> dict:
     # Confidence: scale avg_polarity to 0-100
     confidence = min(100, abs(avg_polarity) * 300)
 
-    # Top headlines
+    # Top headlines (by raw polarity)
     top_bullish = sorted(bullish, key=lambda x: x["polarity"],
                          reverse=True)[:3]
     top_bearish = sorted(bearish, key=lambda x: x["polarity"])[:3]
@@ -186,6 +225,8 @@ def score_sentiment(headlines: list[dict]) -> dict:
         "top_bullish": top_bullish,
         "top_bearish": top_bearish,
         "total": len(scores),
+        "raw_count": raw_count,
+        "no_data_msg": "",
     }
 
 

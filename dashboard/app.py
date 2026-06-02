@@ -912,6 +912,15 @@ else:
         unsafe_allow_html=True,
     )
 
+    # Expirations used — so the trader knows how fresh the chain is.
+    exps = positioning.get("expirations") or []
+    if exps:
+        st.markdown(
+            f"<div style='color:#555;font-size:0.72rem;margin:-0.5rem 0 0.75rem 0;'>"
+            f"Using expirations: {' · '.join(str(e) for e in exps)}</div>",
+            unsafe_allow_html=True,
+        )
+
     # Unusual activity → amber alert.
     unusual = positioning.get("unusual")
     if unusual:

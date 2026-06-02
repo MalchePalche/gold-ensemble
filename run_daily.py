@@ -254,9 +254,10 @@ def main() -> None:
         print(f"\n  News sentiment unavailable: {e}")
 
     # ── Options / OI positioning (GLD put/call) ─────────────────────────────
-    options_signal = None
-    options_pcr_oi = None
-    options_adj    = 0.0
+    options_signal  = None
+    options_pcr_oi  = None
+    options_iv_skew = None
+    options_adj     = 0.0
     confidence_adjusted = today_conf
     try:
         from data.options_flow import get_options_analysis
@@ -266,9 +267,10 @@ def main() -> None:
         if options.get("error"):
             print(f"\n  Options positioning unavailable: {options['error']}")
         else:
-            options_signal = pos_data["signal"]
-            options_pcr_oi = pos_data["pcr_oi"]
-            options_adj    = float(adj.get("adjustment", 0) or 0)
+            options_signal  = pos_data["signal"]
+            options_pcr_oi  = pos_data["pcr_oi"]
+            options_iv_skew = pos_data.get("iv_skew")
+            options_adj     = float(adj.get("adjustment", 0) or 0)
             confidence_adjusted = min(100.0, max(0.0, today_conf + options_adj))
             print(f"\n  Options signal: {options_signal} (PCR: {options_pcr_oi})")
             print(f"  Confidence adjustment: {options_adj:+.1f}%  "
@@ -337,6 +339,7 @@ def main() -> None:
         "confidence_adjusted"    : round(confidence_adjusted, 2),
         "options_signal"         : options_signal,
         "options_pcr_oi"         : round(options_pcr_oi, 3) if options_pcr_oi is not None else None,
+        "options_iv_skew"        : round(options_iv_skew, 4) if options_iv_skew is not None else None,
         "options_adjustment"     : round(options_adj, 1),
         "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
         "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],

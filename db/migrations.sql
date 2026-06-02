@@ -29,4 +29,5 @@ ALTER TABLE signals
   ADD COLUMN IF NOT EXISTS confidence_adjusted numeric(5,2),
   ADD COLUMN IF NOT EXISTS options_signal text,
   ADD COLUMN IF NOT EXISTS options_pcr_oi numeric(6,3),
-  ADD COLUMN IF NOT EXISTS options_adjustment numeric(5,1);
+  ADD COLUMN IF NOT EXISTS options_adjustment numeric(5,1),
+  ADD COLUMN IF NOT EXISTS options_iv_skew numeric(6,4);

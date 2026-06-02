@@ -247,6 +247,17 @@ st.markdown(
   .price-strip { display: flex; gap: 1.5rem; font-size: 0.8rem;
                  color: #888; padding: 0.6rem 0; }
   .price-strip span { color: #e8e8e8; }
+
+  /* forward test performance */
+  .ft-card { background: #161616; border-radius: 8px;
+             padding: 0.9rem; border: 1px solid #1e1e1e; }
+  .ft-win { color: #639922; }
+  .ft-loss { color: #E24B4A; }
+  .ft-pending { color: #888780; }
+  .ft-row-correct { background: rgba(99, 153, 34, 0.08); }
+  .ft-row-incorrect { background: rgba(226, 75, 74, 0.08); }
+  .streak-win { color: #639922; font-weight: 500; }
+  .streak-loss { color: #E24B4A; font-weight: 500; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -324,6 +335,13 @@ def load_cb_data(bias: str):
     """Central-bank layer: official-sector gold reserves + confidence adjustment."""
     from data.central_banks import get_cb_analysis
     return get_cb_analysis(bias)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)  # refresh hourly
+def load_forward_test():
+    """Forward-test layer: live signal accuracy vs actual next-day gold returns."""
+    from data.forward_test import get_forward_test_analysis
+    return get_forward_test_analysis()
 
 
 # ── load ─────────────────────────────────────────────────────────────────────
@@ -1265,6 +1283,186 @@ for r in hist7:
         f"</div>"
     )
 st.markdown(f'<div class="hist-card">{hist_rows_html}</div>', unsafe_allow_html=True)
+
+
+# ── forward test performance (live track record vs actual gold moves) ──────────
+st.markdown('<div class="section-header">Forward test performance</div>', unsafe_allow_html=True)
+
+try:
+    ft = load_forward_test()
+except Exception as e:
+    ft = {"stats": {"error": str(e)}, "eval_df": None}
+ft_stats = ft.get("stats", {}) or {}
+
+ft_evaluated = ft_stats.get("evaluated", 0) or 0
+
+if ft_stats.get("error") or ft_evaluated == 0:
+    # Tracking active but nothing to score yet (or a transient data error).
+    st.markdown(
+        "<div class='ft-card' style='text-align:center;color:#888;font-size:0.85rem;'>"
+        "📊 Forward test tracking active. Performance metrics will appear here "
+        "once signals have been evaluated. Check back tomorrow for first results."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    win_rate    = ft_stats.get("win_rate")
+    total_sig   = ft_stats.get("total_signals", 0)
+    streak      = ft_stats.get("streak_current", 0)
+    streak_type = ft_stats.get("streak_type", "")
+    expectancy  = ft_stats.get("expectancy", 0.0)
+
+    # 1. Header stats row — 4 metric cards.
+    if win_rate is None:
+        wr_cls, wr_txt = "metric-neutral", "—"
+    elif win_rate > 55:
+        wr_cls, wr_txt = "metric-positive", f"{win_rate:.1f}%"
+    elif win_rate >= 45:
+        wr_cls, wr_txt = "metric-amber", f"{win_rate:.1f}%"
+    else:
+        wr_cls, wr_txt = "metric-negative", f"{win_rate:.1f}%"
+
+    streak_cls = "metric-positive" if streak_type == "WIN" else "metric-negative"
+    streak_txt = f"{streak} {streak_type}" if streak_type else "—"
+
+    exp_cls = ("metric-positive" if expectancy > 0
+               else "metric-negative" if expectancy < 0 else "metric-neutral")
+
+    st.markdown(
+        f"""
+<div class="metric-grid">
+  <div class="metric-card">
+    <div class="metric-label">Win rate</div>
+    <div class="metric-value {wr_cls}">{wr_txt}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Signals evaluated</div>
+    <div class="metric-value">{ft_evaluated} / {total_sig}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Current streak</div>
+    <div class="metric-value {streak_cls}">{streak_txt}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Expectancy</div>
+    <div class="metric-value {exp_cls}">{expectancy:+.3f}%</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # 2. High vs low confidence comparison.
+    wr_high = ft_stats.get("win_rate_high_conf")
+    wr_low  = ft_stats.get("win_rate_low_conf")
+    hi_txt  = f"{wr_high:.1f}%" if wr_high is not None else "—"
+    lo_txt  = f"{wr_low:.1f}%" if wr_low is not None else "—"
+    c_hi, c_lo = st.columns(2)
+    c_hi.markdown(
+        f"<div class='ft-card'><div class='metric-label'>High confidence (&gt;65%)</div>"
+        f"<div class='metric-value'>{hi_txt} <span style='font-size:0.8rem;color:#888;'>win rate</span></div></div>",
+        unsafe_allow_html=True,
+    )
+    c_lo.markdown(
+        f"<div class='ft-card'><div class='metric-label'>Low confidence (≤65%)</div>"
+        f"<div class='metric-value'>{lo_txt} <span style='font-size:0.8rem;color:#888;'>win rate</span></div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div style='color:#888;font-size:0.72rem;margin:0.4rem 0 0.75rem 0;'>"
+        "Higher confidence should outperform lower — if not, recalibrate thresholds</div>",
+        unsafe_allow_html=True,
+    )
+
+    # 3. Bullish vs Bearish accuracy.
+    wr_bull = ft_stats.get("wr_bullish")
+    wr_bear = ft_stats.get("wr_bearish")
+    bull_txt = f"{wr_bull:.1f}%" if wr_bull is not None else "—"
+    bear_txt = f"{wr_bear:.1f}%" if wr_bear is not None else "—"
+    c_bull, c_bear = st.columns(2)
+    c_bull.markdown(
+        f"<div class='ft-card'><div class='metric-label'>BULLISH calls</div>"
+        f"<div class='metric-value metric-positive'>{bull_txt} <span style='font-size:0.8rem;color:#888;'>accurate</span></div></div>",
+        unsafe_allow_html=True,
+    )
+    c_bear.markdown(
+        f"<div class='ft-card'><div class='metric-label'>BEARISH calls</div>"
+        f"<div class='metric-value metric-negative'>{bear_txt} <span style='font-size:0.8rem;color:#888;'>accurate</span></div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # 4. Confidence calibration chart.
+    buckets = ft_stats.get("confidence_calibration") or []
+    if buckets:
+        bx = [b["range"] for b in buckets]
+        by = [b["win_rate"] for b in buckets]
+        bar_colors = [GREEN if v > 50 else RED for v in by]
+        fig_cal = go.Figure()
+        fig_cal.add_trace(go.Bar(
+            x=bx, y=by, marker_color=bar_colors,
+            hovertemplate="%{x}<br>%{y:.1f}% win<extra></extra>",
+            text=[f"{v:.0f}%" for v in by], textposition="outside",
+            textfont=dict(color="#888", size=10),
+        ))
+        # Reference line at 50% (random chance).
+        fig_cal.add_hline(y=50, line_dash="dot", line_color="#555", line_width=1)
+        fig_cal.update_layout(
+            title=dict(text="Does confidence predict accuracy?",
+                       font=dict(color="#888", size=12), x=0, xanchor="left"),
+            paper_bgcolor="#111", plot_bgcolor="#111", height=180,
+            margin=dict(l=0, r=0, t=30, b=0), bargap=0.4,
+            xaxis=dict(gridcolor="#1e1e1e", tickfont=dict(color="#888", size=11)),
+            yaxis=dict(gridcolor="#1e1e1e", tickfont=dict(color="#888", size=11),
+                       ticksuffix="%", range=[0, 100]),
+        )
+        st.plotly_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
+
+    # 5. Recent signals table (last 14 evaluated, newest first).
+    evaluated_signals = ft_stats.get("evaluated_signals") or []
+    recent_eval = sorted(evaluated_signals, key=lambda r: str(r["date"]), reverse=True)[:14]
+    if recent_eval:
+        ft_rows_html = ""
+        for r in recent_eval:
+            b = r.get("bias", "")
+            bk = bias_key(b)
+            try:
+                d = datetime.strptime(str(r["date"]), "%Y-%m-%d").strftime("%b %d")
+            except Exception:
+                d = str(r["date"])
+            conf_r = float(r.get("confidence") or 0)
+            nret = r.get("next_return")
+            corr = r.get("correct")
+            if corr is None:
+                row_cls, mark, mark_cls = "ft-row-pending", "—", "ft-pending"
+            elif corr:
+                row_cls, mark, mark_cls = "ft-row-correct", "✓", "ft-win"
+            else:
+                row_cls, mark, mark_cls = "ft-row-incorrect", "✗", "ft-loss"
+            if nret is None:
+                ret_txt, ret_cls = "—", "hist-vol"
+            else:
+                ret_txt = f"{nret:+.2f}%"
+                ret_cls = "price-positive" if nret >= 0 else "price-negative"
+            ft_rows_html += (
+                f"<div class='hist-row {row_cls}'>"
+                f"<div class='hist-date'>{d}</div>"
+                f"<div class='hist-{bk}'>{b}</div>"
+                f"<div class='hist-size'>{conf_r:.0f}%</div>"
+                f"<div class='hist-conf {ret_cls}'>{ret_txt}</div>"
+                f"<div class='{mark_cls}' style='width:24px;text-align:center;'>{mark}</div>"
+                f"</div>"
+            )
+        st.markdown(
+            "<div class='hist-row' style='color:#888;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;'>"
+            "<div class='hist-date'>Date</div>"
+            "<div style='width:65px;'>Bias</div>"
+            "<div class='hist-size'>Conf</div>"
+            "<div class='hist-conf'>Next day</div>"
+            "<div style='width:24px;text-align:center;'>OK</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(f"<div class='hist-card'>{ft_rows_html}</div>", unsafe_allow_html=True)
 
 
 # ── last updated line ──────────────────────────────────────────────────────────

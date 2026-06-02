@@ -100,35 +100,3 @@ class EnsembleModel:
             confidence_pct=confidence_pct,
             per_strategy=results,
         )
-
-    def latest(self, gold_df: pd.DataFrame) -> EnsembleOutput:
-        """Convenience: most recent bar as a clean snapshot."""
-        series = self.run(gold_df)
-        if series.score.empty:
-            return EnsembleOutput(date=pd.NaT, bias="NEUTRAL",
-                                  confidence_pct=0.0, final_score=0.0)
-
-        i     = -1
-        date  = series.score.index[i]
-        score = float(series.score.iloc[i])
-        sig   = int(series.signal.iloc[i])
-        bias  = "BULLISH" if sig > 0 else ("BEARISH" if sig < 0 else "NEUTRAL")
-        conf  = float(series.confidence_pct.iloc[i])
-
-        active, conflicting = [], []
-        per_strat: Dict[str, Dict[str, float]] = {}
-        for k, r in series.per_strategy.items():
-            s_v = int(r.signal.iloc[i])   if not r.signal.empty     else 0
-            c_v = float(r.confidence.iloc[i]) if not r.confidence.empty else 0.0
-            per_strat[k] = {"signal": s_v, "confidence": round(c_v, 3)}
-            if s_v == sig and sig != 0:
-                active.append(k)
-            elif s_v == -sig and sig != 0:
-                conflicting.append(k)
-
-        return EnsembleOutput(
-            date=date, bias=bias,
-            confidence_pct=round(conf, 1), final_score=round(score, 4),
-            active_signals=active, conflicting_signals=conflicting,
-            per_strategy=per_strat,
-        )

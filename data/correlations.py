@@ -97,7 +97,8 @@ def fetch_correlations(lookback_days: int = 30) -> dict:
                 "breakdown": breakdown,
                 "breakdown_msg": breakdown_msg,
             }
-        except Exception:
+        except Exception as e:
+            print(f"[correlations] Warning: {meta.get('label', key)} failed: {e}")
             continue
 
     return results

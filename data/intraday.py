@@ -16,11 +16,9 @@ import os
 
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import pytz
 
-SOFIA_TZ = pytz.timezone('Europe/Sofia')
 LONDON_OPEN_UTC = 8   # 08:00 UTC
 NY_OPEN_UTC = 13      # 13:30 UTC
 
@@ -68,7 +66,8 @@ def fetch_intraday(interval: str = '5m',
                     df[price_cols] = df[price_cols] - premium
 
                 return df, ticker, premium
-        except Exception:
+        except Exception as e:
+            print(f"[intraday] Warning: {ticker} fetch failed: {e}")
             continue
 
     return pd.DataFrame(), None, 0.0
@@ -134,7 +133,8 @@ def get_current_price_action(df: pd.DataFrame) -> dict:
         return {}
 
     recent = df.tail(15)
-    current_price = float(df['Close'].iloc[-1])
+    current_price = float(df['Close'].iloc[-1])     # live (possibly in-progress) bar — display only
+    confirm_price = float(df['Close'].iloc[-2])     # last COMPLETED bar — used for breakout confirmation
     prev_price = float(df['Close'].iloc[-2])
 
     # EMA slope on recent bars
@@ -149,6 +149,7 @@ def get_current_price_action(df: pd.DataFrame) -> dict:
 
     return {
         'current': round(current_price, 2),
+        'current_confirm': round(confirm_price, 2),
         'prev': round(prev_price, 2),
         'change_5m': round(current_price - prev_price, 2),
         'ema9_slope': round(slope, 3),
@@ -194,7 +195,9 @@ def get_confirmation_signal(
             'entry_zone': None,
         }
 
-    current = price_action['current']
+    # Confirm breakouts against the last COMPLETED bar, not the in-progress one,
+    # so a half-formed 5m bar can't fire a premature ENTER.
+    current = price_action.get('current_confirm', price_action['current'])
     slope = price_action['ema9_slope']
     vol_ratio = price_action['vol_ratio']
 

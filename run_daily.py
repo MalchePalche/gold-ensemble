@@ -44,6 +44,11 @@ STRAT_NAMES = {
 }
 BIAS_OF = {1: "BULLISH", 0: "NEUTRAL", -1: "BEARISH"}
 
+# GC=F futures trade ~$25 above spot XAU/USD. Subtract the premium so every
+# stored/displayed price level is on the spot scale (matches the intraday
+# session levels). Override via the INTRADAY_SPOT_PREMIUM env var.
+SPOT_PREMIUM = float(os.getenv("INTRADAY_SPOT_PREMIUM", "25"))
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -113,15 +118,32 @@ def main() -> None:
         cache_ttl_hours = data_cfg.get("cache_ttl_hours", 12),
         use_cache       = True,
     )
-    gold        = loader.load_gold(years=data_cfg.get("history_years", 15))
+    try:
+        gold = loader.load_gold(years=data_cfg.get("history_years", 15))
+        if gold is None or gold.empty:
+            raise RuntimeError("Empty gold data returned")
+    except Exception as e:
+        error_msg = (f"🚨 PIPELINE FAILED\n"
+                     f"Gold data fetch failed: {e}\nNo signal generated.")
+        print(f"[run_daily] CRITICAL: {error_msg}")
+        # Best-effort Telegram alert so a silent data outage is noticed.
+        try:
+            bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or tg_cfg.get("bot_token", "")
+            chat_id   = os.getenv("TELEGRAM_CHAT_ID")   or tg_cfg.get("chat_id", "")
+            if bot_token and "YOUR" not in bot_token and chat_id and "YOUR" not in chat_id:
+                _send_telegram(bot_token, chat_id, error_msg)
+        except Exception:
+            pass
+        sys.exit(1)
     close       = gold["close"]
     bar_returns = close.pct_change().fillna(0.0)
 
     # ── 2. Ensemble signals ────────────────────────────────────────────────
     print("[run_daily] Computing ensemble signals…")
     model = EnsembleModel(
-        weights   = ens_cfg.get("weights", {"S1": 1.5, "S2": 0.5, "S4": 1.5, "S5": 2.0}),
-        dead_zone = ens_cfg.get("dead_zone", 0.05),
+        weights        = ens_cfg.get("weights", {"S1": 1.5, "S2": 0.5, "S4": 1.5, "S5": 2.0}),
+        dead_zone      = ens_cfg.get("dead_zone", 0.05),
+        strategy_params= cfg.get("strategies", {}),
     )
     series = model.run(gold)
     signal = series.signal
@@ -164,7 +186,9 @@ def main() -> None:
 
     # ── 5. Today's values ──────────────────────────────────────────────────
     today_date   = gold.index[-1].date()
-    today_close  = float(close.iloc[-1])
+    # Spot-adjusted close (futures price minus the spot premium) — used for
+    # display and storage so the dashboard headline matches the spot scale.
+    today_close  = float(close.iloc[-1]) - SPOT_PREMIUM
     today_sig    = int(signal.iloc[-1])
     today_conf   = float(conf.iloc[-1])
     today_vol    = vol_regime.iloc[-1]
@@ -175,7 +199,9 @@ def main() -> None:
     bias_str     = BIAS_OF[today_sig]
 
     sma_200_series = close.rolling(200).mean()
-    sma_200        = float(sma_200_series.iloc[-1]) if sma_200_series.notna().iloc[-1] else None
+    # Spot-adjusted too, so the dashboard's 200d SMA shares the price scale.
+    sma_200        = (float(sma_200_series.iloc[-1]) - SPOT_PREMIUM
+                      if sma_200_series.notna().iloc[-1] else None)
 
     # Per-strategy latest signal + driver (for the signals table / dashboard)
     per_strat = {}
@@ -189,7 +215,13 @@ def main() -> None:
     # ── 6. Yesterday comparison ────────────────────────────────────────────
     yesterday  = _load_previous(str(today_date))
     prev_bias  = yesterday.get("bias") if yesterday else None
-    prev_pos   = float(yesterday.get("position_size", today_pos)) if yesterday else today_pos
+    # .get(...) returns None (not the default) if the column exists but is NULL,
+    # so guard explicitly to avoid float(None) crashing the run.
+    if yesterday is not None:
+        _prev_raw = yesterday.get("position_size")
+        prev_pos  = float(_prev_raw) if _prev_raw is not None else today_pos
+    else:
+        prev_pos  = today_pos
     pos_change = today_pos - prev_pos
     bias_flip  = (prev_bias is not None) and (prev_bias != bias_str)
 

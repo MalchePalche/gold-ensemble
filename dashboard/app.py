@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import yfinance as yf
@@ -51,6 +52,31 @@ def bias_hex(b: str | None) -> str:
     return {"BULLISH": GREEN, "BEARISH": RED}.get(b or "", NEUTRAL)
 
 
+# Spot offset applied to GC=F futures so every "XAU/USD" number is on the spot
+# scale (matches the intraday session levels). Override via env var.
+SPOT_PREMIUM = float(os.getenv("INTRADAY_SPOT_PREMIUM", "25"))
+
+
+def is_signal_stale(signal_date) -> tuple[bool, int]:
+    """Return (is_stale, age_in_days) for the latest stored signal.
+
+    Accounts for weekends — a Monday/Sunday read legitimately sees a signal
+    from the prior Friday, so the staleness threshold is widened on those days.
+    """
+    from datetime import date
+
+    today = date.today()
+    sig_date = pd.to_datetime(signal_date).date()
+    delta = (today - sig_date).days
+    if today.weekday() == 0:        # Monday — Friday's signal is fine
+        stale = delta > 3
+    elif today.weekday() == 6:      # Sunday — Friday's signal is fine
+        stale = delta > 2
+    else:
+        stale = delta > 1
+    return stale, delta
+
+
 # ── global styling ────────────────────────────────────────────────────────────
 st.markdown(
     """
@@ -69,6 +95,12 @@ st.markdown(
   .signal-bearish { border-left: 3px solid #E24B4A; }
   .signal-bullish { border-left: 3px solid #639922; }
   .signal-neutral { border-left: 3px solid #888780; }
+  .signal-card-stale { opacity: 0.5; }
+
+  /* stale-signal warning banner */
+  .stale-banner { background: #2a1010; border: 1px solid #E24B4A; border-radius: 8px;
+                  padding: 0.9rem 1.1rem; color: #E24B4A; font-size: 0.9rem;
+                  font-weight: 500; margin-bottom: 1rem; line-height: 1.4; }
   .signal-label-bearish { font-size: 2rem; font-weight: 500; color: #E24B4A; }
   .signal-label-bullish { font-size: 2rem; font-weight: 500; color: #639922; }
   .signal-label-neutral { font-size: 2rem; font-weight: 500; color: #888780; }
@@ -277,9 +309,15 @@ def recent_signals(n: int = 14) -> list[dict]:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def live_price() -> float | None:
-    """Live XAU/USD price via yfinance fast_info (refreshes every 60s)."""
+    """Live XAU/USD price via yfinance fast_info (refreshes every 60s).
+
+    GC=F is a futures contract trading ~$25 above spot; subtract SPOT_PREMIUM so
+    the headline price is on the same spot scale as the stored signal price and
+    the intraday session levels.
+    """
     try:
-        return float(yf.Ticker("GC=F").fast_info.last_price)
+        raw_price = float(yf.Ticker("GC=F").fast_info.last_price)
+        return raw_price - SPOT_PREMIUM
     except Exception:
         return None
 
@@ -360,6 +398,10 @@ bias         = signal["bias"]
 stored_price = float(signal["price"]) if signal.get("price") is not None else None
 price_now    = live_price()
 
+# Is the latest stored signal stale (run_daily.py didn't run)? If so we suppress
+# the intraday ENTRY confirmation and grey the signal card further down.
+is_stale, signal_age_days = is_signal_stale(signal["date"])
+
 try:
     week_events, today_events, next_event, risk_score = load_calendar()
 except Exception:
@@ -379,6 +421,17 @@ try:
     intraday = load_intraday(bias)
 except Exception as e:
     intraday = {"error": str(e)}
+
+# A stale daily signal must NOT be dressed up with a live "ENTRY CONFIRMED"
+# banner — force the confirmation to WAIT so nobody trades an old bias.
+if is_stale and isinstance(intraday, dict) and not intraday.get("error"):
+    _confirm = intraday.get("confirmation") or {}
+    _confirm["signal"] = "WAIT"
+    _confirm["reason"] = (f"Daily signal is {signal_age_days} days old — "
+                          f"intraday confirmation suppressed")
+    _confirm["entry_zone"] = None
+    _confirm["size_modifier"] = 0.0
+    intraday["confirmation"] = _confirm
 
 try:
     options_data = load_options(bias)
@@ -403,6 +456,16 @@ except Exception:
     COUNTRY_FLAGS_DASH = {}
 
 
+# ── stale-signal banner (top of dashboard) ─────────────────────────────────────
+if is_stale:
+    st.markdown(
+        f"<div class='stale-banner'>⚠️ STALE SIGNAL — Last signal "
+        f"{signal_age_days} day{'s' if signal_age_days != 1 else ''} old. "
+        f"run_daily.py may not have run. Intraday confirmation suppressed.</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ── top bar ────────────────────────────────────────────────────────────────────
 top_l, top_r = st.columns([3, 1])
 
@@ -423,6 +486,7 @@ with top_l:
         f"""
         <div style="color:#888;font-size:0.8rem;letter-spacing:0.05em;">XAU/USD · V4 ENSEMBLE</div>
         <div style="font-size:2.2rem;font-weight:600;color:#e8e8e8;line-height:1.2;">{price_html}</div>
+        <div style="color:#555;font-size:0.68rem;">spot-adjusted</div>
         {change_html}
         """,
         unsafe_allow_html=True,
@@ -443,12 +507,24 @@ with top_r:
 conf = float(signal["confidence"])
 pos  = float(signal["position_size"])
 
-# Positioning adjustments (display only — Supabase keeps the clean signal).
-# Combine the options layer (timing) and the central-bank layer (structural).
-opt_adj = float(adjustment.get("adjustment", 0) or 0)
-cb_adj = float(cb_adjustment.get("adjustment", 0) or 0)
-total_adjustment = opt_adj + cb_adj
-adjusted_confidence = min(100, max(0, conf + total_adjustment))
+# Confidence shown to the user. Source of truth is the value run_daily.py
+# computed and stored at signal time (confidence_adjusted + the options/CB
+# adjustments it used). Only fall back to a live recompute for old rows that
+# predate those columns, so the displayed number always equals base+opt+cb.
+stored_adj_conf = signal.get("confidence_adjusted")
+if stored_adj_conf is not None:
+    adjusted_confidence = float(stored_adj_conf)
+    _so = signal.get("options_adjustment")
+    _sc = signal.get("cb_adjustment")
+    opt_adj = float(_so) if _so is not None else 0.0
+    cb_adj = float(_sc) if _sc is not None else 0.0
+    total_adjustment = opt_adj + cb_adj
+else:
+    # Fallback (old rows): recompute live from the overlay layers.
+    opt_adj = float(adjustment.get("adjustment", 0) or 0)
+    cb_adj = float(cb_adjustment.get("adjustment", 0) or 0)
+    total_adjustment = opt_adj + cb_adj
+    adjusted_confidence = min(100, max(0, conf + total_adjustment))
 
 # Small "base · options · CB" tag under the headline confidence number,
 # coloured by the net adjustment.
@@ -473,9 +549,10 @@ else:
     aligned_txt = f"{len(aligned)}/4 strategies aligned · {names}"
 
 bk = bias_key(bias)
+stale_cls = " signal-card-stale" if is_stale else ""
 st.markdown(
     f"""
-<div class="signal-card signal-{bk}">
+<div class="signal-card signal-{bk}{stale_cls}">
   <div>
     <div class="signal-label-{bk}">{bias}</div>
     <div class="signal-sub">{aligned_txt}</div>
@@ -1231,6 +1308,11 @@ else:
     y = [float(r["confidence"]) for r in hist14]
     biases = [r["bias"] for r in hist14]
 
+    # Dynamic Y range so points outside the old fixed [40, 85] window aren't
+    # clipped off-chart.
+    y_min = max(0, min(y) - 5)
+    y_max = min(100, max(y) + 5)
+
     fig = go.Figure()
     # Line chart with markers; each segment colored by the day it arrives at.
     for i in range(len(x) - 1):
@@ -1253,7 +1335,7 @@ else:
         xaxis=dict(type="category", gridcolor="#1e1e1e",
                    tickfont=dict(color="#888", size=11)),
         yaxis=dict(gridcolor="#1e1e1e", tickfont=dict(color="#888", size=11),
-                   ticksuffix="%", range=[40, 85]),
+                   ticksuffix="%", range=[y_min, y_max]),
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 

@@ -16,12 +16,10 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 
-import pytz
 import requests
 from textblob import TextBlob
 
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-SOFIA_TZ = pytz.timezone("Europe/Sofia")
 
 # Commodity-context keywords. A headline must contain at least one of these to
 # count as gold-relevant; the more it contains, the higher its relevance weight.
@@ -115,7 +113,8 @@ def fetch_headlines(hours_back: int = 48) -> list[dict]:
         )
         data = r.json()
         articles = data.get("articles", [])
-    except Exception:
+    except Exception as e:
+        print(f"[sentiment] Warning: NewsAPI fetch failed: {e}")
         return []
 
     results = []

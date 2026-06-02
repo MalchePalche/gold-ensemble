@@ -53,51 +53,115 @@ COUNTRY_FLAGS = {
 _WB_URL = "https://api.worldbank.org/v2/country/{}/indicator/FI.RES.XGLD.CD"
 
 
+def _fetch_one_country(code: str, name: str) -> tuple[str, dict | None]:
+    """Fetch one country's gold-reserve history from the World Bank API."""
+    r = requests.get(
+        _WB_URL.format(code),
+        params={"format": "json", "per_page": 10, "mrv": 8},
+        timeout=5,
+    )
+    data = r.json()
+
+    if not data or len(data) < 2:
+        return code, None
+
+    records = data[1]
+    if not records:
+        return code, None
+
+    # World Bank returns newest-first; keep only non-null observations.
+    values = [
+        {"year": rec["date"], "value": float(rec["value"]), "country": name}
+        for rec in records
+        if rec.get("value") is not None
+    ]
+
+    if not values:
+        return code, None
+
+    return code, {
+        "name": name,
+        "latest": values[0]["value"],
+        "previous": values[1]["value"] if len(values) > 1 else None,
+        "history": values,
+    }
+
+
 def fetch_wb_gold_reserves() -> dict:
     """
-    Fetch gold reserves (USD) from the World Bank API.
+    Fetch gold reserves (USD) from the World Bank API, concurrently.
 
     Indicator FI.RES.XGLD.CD — free, no API key required. Returns a dict
     keyed by country code with the latest value, the prior year's value, and
-    the recent history. Countries that fail individually are skipped so a
-    single bad response never sinks the whole layer.
+    the recent history. Countries are fetched in parallel (5s per-request
+    timeout) so a single slow endpoint can't stall the whole layer; failures
+    are logged and skipped individually.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     results: dict = {}
 
-    for code, name in COUNTRIES.items():
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(_fetch_one_country, code, name): code
+            for code, name in COUNTRIES.items()
+        }
         try:
-            r = requests.get(
-                _WB_URL.format(code),
-                params={"format": "json", "per_page": 10, "mrv": 8},
-                timeout=10,
-            )
-            data = r.json()
-
-            if not data or len(data) < 2:
-                continue
-
-            records = data[1]
-            if not records:
-                continue
-
-            # World Bank returns newest-first; keep only non-null observations.
-            values = [
-                {"year": rec["date"], "value": float(rec["value"]), "country": name}
-                for rec in records
-                if rec.get("value") is not None
-            ]
-
-            if values:
-                results[code] = {
-                    "name": name,
-                    "latest": values[0]["value"],
-                    "previous": values[1]["value"] if len(values) > 1 else None,
-                    "history": values,
-                }
-        except Exception:
-            continue
+            for future in as_completed(futures, timeout=15):
+                try:
+                    code, result = future.result()
+                    if result:
+                        results[code] = result
+                except Exception as e:
+                    print(f"[central_banks] Warning: {futures[future]} failed: {e}")
+        except Exception as e:
+            # as_completed itself timed out — keep whatever finished in time.
+            print(f"[central_banks] Warning: WB fetch timed out: {e}")
 
     return results
+
+
+def fetch_annual_gold_prices() -> dict:
+    """Average GC=F close per calendar year, keyed by year string.
+
+    Used to deflate the World Bank's USD-valued gold reserves into a
+    tonnage-equivalent so the YoY change reflects actual buying/selling rather
+    than gold-price appreciation.
+    """
+    import yfinance as yf
+    from datetime import datetime
+
+    try:
+        df = yf.download(
+            "GC=F",
+            start="2015-01-01",
+            end=datetime.today().strftime("%Y-%m-%d"),
+            progress=False,
+        )["Close"]
+        if hasattr(df, "columns"):       # flatten MultiIndex / DataFrame → Series
+            df = df.squeeze()
+        annual = df.resample("YE").mean()
+        return {str(idx.year): float(px) for idx, px in annual.items()}
+    except Exception as e:
+        print(f"[central_banks] Warning: annual gold price fetch failed: {e}")
+        return {}
+
+
+def deflate_by_gold_price(reserves_data: dict, gold_prices: dict) -> dict:
+    """Divide each country's USD reserves by that year's gold price.
+
+    Removes the price-appreciation effect so a country only counts as a buyer
+    when it actually added tonnage. Adds a `value_deflated` field to every
+    history record (falls back to the raw value when no price is available).
+    """
+    for data in reserves_data.values():
+        for record in data.get("history", []):
+            gold_px = gold_prices.get(record["year"])
+            if gold_px and gold_px > 0:
+                record["value_deflated"] = record["value"] / gold_px
+            else:
+                record["value_deflated"] = record["value"]
+    return reserves_data
 
 
 def analyze_cb_trend(reserves_data: dict) -> dict:
@@ -133,10 +197,20 @@ def analyze_cb_trend(reserves_data: dict) -> dict:
     total_previous = 0.0
 
     for data in reserves_data.values():
-        latest = data["latest"]
-        previous = data["previous"]
         name = data["name"]
         flag = COUNTRY_FLAGS.get(name, "")
+
+        # Prefer gold-price-deflated values (tonnage-equivalent) when available
+        # so the YoY change isn't just gold-price appreciation. History is
+        # newest-first, so [0] is latest and [1] the prior year.
+        history = data.get("history", [])
+        defl = [h for h in history if h.get("value_deflated") is not None]
+        if len(defl) >= 2:
+            latest = defl[0]["value_deflated"]
+            previous = defl[1]["value_deflated"]
+        else:
+            latest = data["latest"]
+            previous = data["previous"]
 
         if previous is None or previous == 0:
             stable.append(name)
@@ -249,6 +323,11 @@ def get_cb_analysis(ensemble_bias: str) -> dict:
     """Main entry point — fetch reserves, analyze, and size the adjustment."""
     try:
         reserves = fetch_wb_gold_reserves()
+        # Deflate USD reserves by annual gold price so "buying" reflects real
+        # tonnage changes, not gold-price appreciation (false-bullish in rallies).
+        gold_prices = fetch_annual_gold_prices()
+        if gold_prices:
+            reserves = deflate_by_gold_price(reserves, gold_prices)
         analysis = analyze_cb_trend(reserves)
         adjustment = get_confidence_adjustment(
             analysis["signal"], ensemble_bias, analysis["score"])

@@ -130,8 +130,13 @@ def auto_evaluate_pending(supabase_client) -> dict:
             "message": "No pending signals to evaluate",
         }
 
-    # Fetch recent daily returns to look up each signal's next-day move.
-    returns = fetch_gold_returns(30)
+    # Fetch daily returns over a window wide enough to cover the OLDEST pending
+    # signal — a fixed 30-day window silently drops any signal older than that
+    # (e.g. after the runner was down for a stretch), so it would never be scored.
+    oldest = min(pd.to_datetime(s["date"]).date() for s in pending)
+    days_needed = (date.today() - oldest).days + 10
+    days_needed = max(30, min(days_needed, 365))
+    returns = fetch_gold_returns(days_needed)
     evaluated_count = 0
     results = []
 
@@ -182,24 +187,112 @@ def auto_evaluate_pending(supabase_client) -> dict:
     }
 
 
+def _compute_stats_core(evaluated: pd.DataFrame, total_signals: int,
+                        pending_count: int) -> dict:
+    """Shared metric computation over an already-evaluated frame.
+
+    `evaluated` must carry the columns: bias, date, confidence (float),
+    correct (bool), next_return (float, percentage points). Both
+    `compute_stats()` (on-the-fly evaluation) and `compute_stats_from_db()`
+    (stored outcomes) normalise their input to this shape and delegate here,
+    so the win-rate / streak / calibration logic lives in exactly one place.
+    """
+    total_eval = len(evaluated)
+    correct = int(evaluated["correct"].sum())
+    win_rate = correct / total_eval if total_eval > 0 else 0
+
+    # High vs low confidence.
+    high_conf = evaluated[evaluated["confidence"] > 65]
+    low_conf = evaluated[evaluated["confidence"] <= 65]
+
+    wr_high = (high_conf["correct"].sum() / len(high_conf)
+               if len(high_conf) > 0 else None)
+    wr_low = (low_conf["correct"].sum() / len(low_conf)
+              if len(low_conf) > 0 else None)
+
+    # Returns analysis.
+    correct_returns = evaluated[evaluated["correct"] == True]["next_return"]
+    incorrect_returns = evaluated[evaluated["correct"] == False]["next_return"]
+
+    avg_win = float(correct_returns.mean()) if len(correct_returns) > 0 else 0
+    avg_loss = float(incorrect_returns.mean()) if len(incorrect_returns) > 0 else 0
+
+    loss_rate = 1 - win_rate
+    expectancy = (win_rate * avg_win) - (loss_rate * abs(avg_loss))
+
+    # Current streak (walk back from the most recent evaluated signal).
+    streak = 0
+    streak_type = None
+    for _, row in evaluated.sort_values("date", ascending=False).iterrows():
+        if streak == 0:
+            streak_type = "WIN" if row["correct"] else "LOSS"
+            streak = 1
+        elif (row["correct"] and streak_type == "WIN") or \
+             (not row["correct"] and streak_type == "LOSS"):
+            streak += 1
+        else:
+            break
+
+    # Best win streak.
+    best_streak = 0
+    current = 0
+    for _, row in evaluated.sort_values("date").iterrows():
+        if row["correct"]:
+            current += 1
+            best_streak = max(best_streak, current)
+        else:
+            current = 0
+
+    # By bias.
+    bull_eval = evaluated[evaluated["bias"] == "BULLISH"]
+    bear_eval = evaluated[evaluated["bias"] == "BEARISH"]
+    wr_bull = (bull_eval["correct"].sum() / len(bull_eval)
+               if len(bull_eval) > 0 else None)
+    wr_bear = (bear_eval["correct"].sum() / len(bear_eval)
+               if len(bear_eval) > 0 else None)
+
+    # Confidence calibration buckets.
+    buckets = []
+    for low, high in [(40, 50), (50, 60), (60, 70), (70, 80), (80, 100)]:
+        bucket = evaluated[
+            (evaluated["confidence"] >= low) &
+            (evaluated["confidence"] < high)
+        ]
+        if len(bucket) > 0:
+            buckets.append({
+                "range": f"{low}-{high}%",
+                "count": len(bucket),
+                "win_rate": round(
+                    bucket["correct"].sum() / len(bucket) * 100, 1),
+            })
+
+    return {
+        "error": None,
+        "total_signals": total_signals,
+        "evaluated": total_eval,
+        "pending": pending_count,
+        "win_rate": round(win_rate * 100, 1),
+        "win_rate_high_conf": round(wr_high * 100, 1) if wr_high is not None else None,
+        "win_rate_low_conf": round(wr_low * 100, 1) if wr_low is not None else None,
+        "avg_return_correct": round(avg_win, 3),
+        "avg_return_incorrect": round(avg_loss, 3),
+        "expectancy": round(expectancy, 3),
+        "streak_current": streak,
+        "streak_type": streak_type,
+        "best_streak": best_streak,
+        "wr_bullish": round(wr_bull * 100, 1) if wr_bull is not None else None,
+        "wr_bearish": round(wr_bear * 100, 1) if wr_bear is not None else None,
+        "confidence_calibration": buckets,
+        "evaluated_signals": evaluated.to_dict("records"),
+        "pending_signals": pending_count,
+    }
+
+
 def compute_stats(eval_df: pd.DataFrame) -> dict:
     """
-    Compute forward-test statistics from evaluated signals.
-
-    Metrics:
-    - total_signals: total non-neutral signals
-    - evaluated: signals with known outcome
-    - pending: signals awaiting next day
-    - win_rate: correct / evaluated
-    - win_rate_high_conf: win rate when confidence > 65%
-    - win_rate_low_conf: win rate when confidence <= 65%
-    - avg_return_correct: avg next-day return on correct calls
-    - avg_return_incorrect: avg next-day return on incorrect calls
-    - expectancy: (win_rate * avg_win) - (loss_rate * avg_loss)
-    - streak_current: current win/loss streak
-    - best_streak: longest win streak
-    - by_bias: win rate split by BULLISH vs BEARISH
-    - confidence_calibration: does higher confidence = higher accuracy?
+    Compute forward-test statistics from on-the-fly evaluated signals (the
+    `evaluate_signals()` output, with a `status` column). Delegates the metric
+    math to `_compute_stats_core()`.
     """
     if eval_df.empty:
         return {"error": "No evaluated signals yet"}
@@ -217,203 +310,28 @@ def compute_stats(eval_df: pd.DataFrame) -> dict:
             "message": "Signals logged but no outcomes yet — check back tomorrow",
         }
 
-    total_eval = len(evaluated)
-    correct = int(evaluated["correct"].sum())
-    win_rate = correct / total_eval if total_eval > 0 else 0
-
-    # High vs low confidence.
-    high_conf = evaluated[evaluated["confidence"] > 65]
-    low_conf = evaluated[evaluated["confidence"] <= 65]
-
-    wr_high = (high_conf["correct"].sum() / len(high_conf)
-               if len(high_conf) > 0 else None)
-    wr_low = (low_conf["correct"].sum() / len(low_conf)
-              if len(low_conf) > 0 else None)
-
-    # Returns analysis.
-    correct_returns = evaluated[evaluated["correct"] == True]["next_return"]
-    incorrect_returns = evaluated[evaluated["correct"] == False]["next_return"]
-
-    avg_win = float(correct_returns.mean()) if len(correct_returns) > 0 else 0
-    avg_loss = float(incorrect_returns.mean()) if len(incorrect_returns) > 0 else 0
-
-    loss_rate = 1 - win_rate
-    expectancy = (win_rate * avg_win) - (loss_rate * abs(avg_loss))
-
-    # Current streak (walk back from the most recent evaluated signal).
-    streak = 0
-    streak_type = None
-    for _, row in evaluated.sort_values("date", ascending=False).iterrows():
-        if streak == 0:
-            streak_type = "WIN" if row["correct"] else "LOSS"
-            streak = 1
-        elif (row["correct"] and streak_type == "WIN") or \
-             (not row["correct"] and streak_type == "LOSS"):
-            streak += 1
-        else:
-            break
-
-    # Best win streak.
-    best_streak = 0
-    current = 0
-    for _, row in evaluated.sort_values("date").iterrows():
-        if row["correct"]:
-            current += 1
-            best_streak = max(best_streak, current)
-        else:
-            current = 0
-
-    # By bias.
-    bull_eval = evaluated[evaluated["bias"] == "BULLISH"]
-    bear_eval = evaluated[evaluated["bias"] == "BEARISH"]
-    wr_bull = (bull_eval["correct"].sum() / len(bull_eval)
-               if len(bull_eval) > 0 else None)
-    wr_bear = (bear_eval["correct"].sum() / len(bear_eval)
-               if len(bear_eval) > 0 else None)
-
-    # Confidence calibration buckets.
-    buckets = []
-    for low, high in [(40, 50), (50, 60), (60, 70), (70, 80), (80, 100)]:
-        bucket = evaluated[
-            (evaluated["confidence"] >= low) &
-            (evaluated["confidence"] < high)
-        ]
-        if len(bucket) > 0:
-            buckets.append({
-                "range": f"{low}-{high}%",
-                "count": len(bucket),
-                "win_rate": round(
-                    bucket["correct"].sum() / len(bucket) * 100, 1),
-            })
-
-    return {
-        "error": None,
-        "total_signals": len(eval_df),
-        "evaluated": total_eval,
-        "pending": len(pending),
-        "win_rate": round(win_rate * 100, 1),
-        "win_rate_high_conf": round(wr_high * 100, 1) if wr_high is not None else None,
-        "win_rate_low_conf": round(wr_low * 100, 1) if wr_low is not None else None,
-        "avg_return_correct": round(avg_win, 3),
-        "avg_return_incorrect": round(avg_loss, 3),
-        "expectancy": round(expectancy, 3),
-        "streak_current": streak,
-        "streak_type": streak_type,
-        "best_streak": best_streak,
-        "wr_bullish": round(wr_bull * 100, 1) if wr_bull is not None else None,
-        "wr_bearish": round(wr_bear * 100, 1) if wr_bear is not None else None,
-        "confidence_calibration": buckets,
-        "evaluated_signals": evaluated.to_dict("records"),
-        "pending_signals": len(pending),
-    }
+    return _compute_stats_core(evaluated, total_signals=len(eval_df),
+                               pending_count=len(pending))
 
 
 def compute_stats_from_db(df: pd.DataFrame) -> dict:
     """
     Compute forward-test statistics from already-evaluated signals stored in
-    Supabase. Identical metrics to `compute_stats()`, but adapted for the DB
-    column names: `next_day_return` is already a percentage (not a fraction)
-    and `correct` is already boolean, so the on-the-fly conversion/evaluation
-    steps are skipped.
+    Supabase. Same metrics as `compute_stats()`, but the DB columns differ:
+    `next_day_return` is already a percentage and `correct` is already boolean,
+    so we just normalise the column names and delegate to the shared core.
     """
     if df.empty:
         return {"error": "No evaluated signals yet"}
 
     evaluated = df.copy()
-    # Normalise the column names this function expects downstream.
+    # Normalise the column names the core expects.
     evaluated["next_return"] = evaluated["next_day_return"].astype(float)
     evaluated["correct"] = evaluated["correct"].astype(bool)
     evaluated["confidence"] = evaluated["confidence"].fillna(0).astype(float)
 
-    total_eval = len(evaluated)
-    correct = int(evaluated["correct"].sum())
-    win_rate = correct / total_eval if total_eval > 0 else 0
-
-    # High vs low confidence.
-    high_conf = evaluated[evaluated["confidence"] > 65]
-    low_conf = evaluated[evaluated["confidence"] <= 65]
-
-    wr_high = (high_conf["correct"].sum() / len(high_conf)
-               if len(high_conf) > 0 else None)
-    wr_low = (low_conf["correct"].sum() / len(low_conf)
-              if len(low_conf) > 0 else None)
-
-    # Returns analysis.
-    correct_returns = evaluated[evaluated["correct"] == True]["next_return"]
-    incorrect_returns = evaluated[evaluated["correct"] == False]["next_return"]
-
-    avg_win = float(correct_returns.mean()) if len(correct_returns) > 0 else 0
-    avg_loss = float(incorrect_returns.mean()) if len(incorrect_returns) > 0 else 0
-
-    loss_rate = 1 - win_rate
-    expectancy = (win_rate * avg_win) - (loss_rate * abs(avg_loss))
-
-    # Current streak (walk back from the most recent evaluated signal).
-    streak = 0
-    streak_type = None
-    for _, row in evaluated.sort_values("date", ascending=False).iterrows():
-        if streak == 0:
-            streak_type = "WIN" if row["correct"] else "LOSS"
-            streak = 1
-        elif (row["correct"] and streak_type == "WIN") or \
-             (not row["correct"] and streak_type == "LOSS"):
-            streak += 1
-        else:
-            break
-
-    # Best win streak.
-    best_streak = 0
-    current = 0
-    for _, row in evaluated.sort_values("date").iterrows():
-        if row["correct"]:
-            current += 1
-            best_streak = max(best_streak, current)
-        else:
-            current = 0
-
-    # By bias.
-    bull_eval = evaluated[evaluated["bias"] == "BULLISH"]
-    bear_eval = evaluated[evaluated["bias"] == "BEARISH"]
-    wr_bull = (bull_eval["correct"].sum() / len(bull_eval)
-               if len(bull_eval) > 0 else None)
-    wr_bear = (bear_eval["correct"].sum() / len(bear_eval)
-               if len(bear_eval) > 0 else None)
-
-    # Confidence calibration buckets.
-    buckets = []
-    for low, high in [(40, 50), (50, 60), (60, 70), (70, 80), (80, 100)]:
-        bucket = evaluated[
-            (evaluated["confidence"] >= low) &
-            (evaluated["confidence"] < high)
-        ]
-        if len(bucket) > 0:
-            buckets.append({
-                "range": f"{low}-{high}%",
-                "count": len(bucket),
-                "win_rate": round(
-                    bucket["correct"].sum() / len(bucket) * 100, 1),
-            })
-
-    return {
-        "error": None,
-        "total_signals": total_eval,
-        "evaluated": total_eval,
-        "pending": 0,
-        "win_rate": round(win_rate * 100, 1),
-        "win_rate_high_conf": round(wr_high * 100, 1) if wr_high is not None else None,
-        "win_rate_low_conf": round(wr_low * 100, 1) if wr_low is not None else None,
-        "avg_return_correct": round(avg_win, 3),
-        "avg_return_incorrect": round(avg_loss, 3),
-        "expectancy": round(expectancy, 3),
-        "streak_current": streak,
-        "streak_type": streak_type,
-        "best_streak": best_streak,
-        "wr_bullish": round(wr_bull * 100, 1) if wr_bull is not None else None,
-        "wr_bearish": round(wr_bear * 100, 1) if wr_bear is not None else None,
-        "confidence_calibration": buckets,
-        "evaluated_signals": evaluated.to_dict("records"),
-        "pending_signals": 0,
-    }
+    return _compute_stats_core(evaluated, total_signals=len(evaluated),
+                               pending_count=0)
 
 
 def get_forward_test_analysis() -> dict:

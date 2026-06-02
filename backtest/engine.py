@@ -211,7 +211,7 @@ class BacktestEngine:
     def run_all(self) -> Dict[str, BacktestResult]:
         """Run all strategies + ensemble together."""
         out: Dict[str, BacktestResult] = {}
-        for key in ["S1", "S2", "S3", "S4", "S5", "S7", "S8", "S9", "S10"]:
+        for key in ["S1", "S2", "S4", "S5"]:
             try:
                 out[key] = self.run_strategy(key)
             except Exception as e:

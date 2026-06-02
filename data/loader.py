@@ -51,14 +51,15 @@ class DataLoader:
             return None
         try:
             return pd.read_pickle(p)
-        except Exception:
+        except Exception as e:
+            print(f"[loader] Warning: cache read for '{name}' failed: {e}")
             return None
 
     def _write_cache(self, name: str, df: pd.DataFrame) -> None:
         try:
             df.to_pickle(self._cache_path(name))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[loader] Warning: cache write for '{name}' failed: {e}")
 
     @staticmethod
     def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:

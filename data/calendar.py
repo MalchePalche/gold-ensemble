@@ -36,7 +36,8 @@ def fetch_calendar() -> list[dict]:
         r = requests.get(FF_URL, timeout=10,
                          headers={"User-Agent": "Mozilla/5.0"})
         events = r.json()
-    except Exception:
+    except Exception as e:
+        print(f"[calendar] Warning: Forex Factory fetch failed: {e}")
         return []
 
     filtered = []

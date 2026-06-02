@@ -91,10 +91,6 @@ def run_once(cfg: Dict[str, Any]) -> None:
     today_matrix = target_size(today_sig, today_conf, today_vol)
     bias_str     = BIAS_OF[today_sig]
 
-    sma_200_series = close.rolling(200).mean()
-    sma_200        = float(sma_200_series.iloc[i]) if sma_200_series.notna().iloc[i] else None
-    cb_active      = (today_matrix > 0.0) and (today_pos == 0.0)
-
     print()
     print("=" * 62)
     print(f"  Gold Ensemble V4  --  {today_date}")
@@ -106,34 +102,18 @@ def run_once(cfg: Dict[str, Any]) -> None:
     print(f"  Matrix target:   {today_matrix}x")
     print(f"  Position (V4):   {today_pos:.2f}x")
     print()
-    per_strat = {}
     for k, r in series.per_strategy.items():
         sv    = int(r.signal.iloc[i])
         cv    = float(r.confidence.iloc[i])
         arrow = "UP " if sv > 0 else "DN " if sv < 0 else "-- "
-        per_strat[k] = {"bias": BIAS_OF[sv], "driver": STRAT_NAMES.get(k, k)}
         print(f"    {k}  {arrow}  conf={cv:.3f}  [{STRAT_NAMES.get(k, k)}]")
     print("=" * 62)
 
-    # Upsert to Supabase
-    from db.queries import save_signal
-    row = {
-        "date"                   : str(today_date),
-        "price"                  : round(today_close, 2),
-        "bias"                   : bias_str,
-        "confidence"             : round(today_conf, 2),
-        "signal_score"           : round(float(series.score.iloc[i]), 4),
-        "position_size"          : round(today_pos, 2),
-        "vol_regime"             : today_vol,
-        "sma_200"                : round(sma_200, 2) if sma_200 is not None else None,
-        "circuit_breaker_active" : bool(cb_active),
-        "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
-        "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],
-        "s4_signal"              : per_strat["S4"]["bias"], "s4_driver": per_strat["S4"]["driver"],
-        "s5_signal"              : per_strat["S5"]["bias"], "s5_driver": per_strat["S5"]["driver"],
-    }
-    save_signal(row)
-    print(f"\n[main] Upserted signal for {today_date} to Supabase.")
+    # Preview mode only — main.py must NOT write to Supabase. It recomputes the
+    # signal on a different code path (and without the options/CB/forward-test
+    # overlays), so persisting from here would clobber run_daily.py's richer row.
+    print("\n[main] Preview mode — signal NOT saved to Supabase.")
+    print("[main] Use run_daily.py for production signal generation.")
 
 
 def launch_dashboard() -> None:

@@ -319,6 +319,13 @@ def load_options(bias: str):
     return get_options_analysis(bias)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)  # refresh once per day — annual data
+def load_cb_data(bias: str):
+    """Central-bank layer: official-sector gold reserves + confidence adjustment."""
+    from data.central_banks import get_cb_analysis
+    return get_cb_analysis(bias)
+
+
 # ── load ─────────────────────────────────────────────────────────────────────
 try:
     signal = latest_signal()
@@ -363,6 +370,20 @@ except Exception as e:
 positioning = options_data.get("positioning", {}) or {}
 adjustment = options_data.get("adjustment", {}) or {}
 
+try:
+    cb_data = load_cb_data(bias)
+except Exception as e:
+    cb_data = {"analysis": {}, "adjustment": {}, "error": str(e)}
+
+cb_analysis = cb_data.get("analysis", {}) or {}
+cb_adjustment = cb_data.get("adjustment", {}) or {}
+
+# Flag lookup for the stable-CB list (buyers/sellers already carry their flag).
+try:
+    from data.central_banks import COUNTRY_FLAGS as COUNTRY_FLAGS_DASH
+except Exception:
+    COUNTRY_FLAGS_DASH = {}
+
 
 # ── top bar ────────────────────────────────────────────────────────────────────
 top_l, top_r = st.columns([3, 1])
@@ -404,19 +425,24 @@ with top_r:
 conf = float(signal["confidence"])
 pos  = float(signal["position_size"])
 
-# Options-positioning adjustment (display only — Supabase keeps the clean signal).
+# Positioning adjustments (display only — Supabase keeps the clean signal).
+# Combine the options layer (timing) and the central-bank layer (structural).
 opt_adj = float(adjustment.get("adjustment", 0) or 0)
-adjusted_confidence = min(100, max(0, conf + opt_adj))
+cb_adj = float(cb_adjustment.get("adjustment", 0) or 0)
+total_adjustment = opt_adj + cb_adj
+adjusted_confidence = min(100, max(0, conf + total_adjustment))
 
-# Small "base · options" tag under the headline confidence number.
-if opt_adj > 0:
-    tag_cls, tag_sign = "conf-tag-pos", f"+{opt_adj:.1f}"
-elif opt_adj < 0:
-    tag_cls, tag_sign = "conf-tag-neg", f"{opt_adj:.1f}"
+# Small "base · options · CB" tag under the headline confidence number,
+# coloured by the net adjustment.
+if total_adjustment > 0:
+    tag_cls = "conf-tag-pos"
+elif total_adjustment < 0:
+    tag_cls = "conf-tag-neg"
 else:
-    tag_cls, tag_sign = "conf-tag-neutral", "0"
+    tag_cls = "conf-tag-neutral"
 conf_tag_html = (
-    f"<div class='conf-tag {tag_cls}'>base: {conf:.1f}% · options: {tag_sign}%</div>"
+    f"<div class='conf-tag {tag_cls}'>base: {conf:.1f}% · "
+    f"options: {opt_adj:+.1f}% · CB: {cb_adj:+.1f}%</div>"
 )
 
 # Count strategies aligned with the headline bias.
@@ -938,6 +964,110 @@ else:
         st.markdown(f"<div class='opt-conflicts'>⚠️ {msg}</div>", unsafe_allow_html=True)
     else:
         st.markdown(f"<div class='opt-neutral-msg'>{msg}</div>", unsafe_allow_html=True)
+
+
+# ── central bank positioning (official-sector gold reserves) ────────────────────
+cb_trend = cb_analysis.get("trend", "UNKNOWN")
+# ACCUMULATING → green, REDUCING → red, STABLE / UNKNOWN → gray.
+_CB_BADGE = {"ACCUMULATING": "bullish", "REDUCING": "bearish"}
+cb_badge = _CB_BADGE.get(cb_trend, "neutral")
+
+st.markdown(
+    f"<div style='display:flex;justify-content:space-between;align-items:center;"
+    f"margin-bottom:0.4rem;'>"
+    f"<div class='section-header' style='margin-bottom:0;'>Central bank positioning</div>"
+    f"<div class='badge-{cb_badge}'>{cb_trend}</div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+if cb_data.get("error") or not cb_analysis or cb_trend == "UNKNOWN":
+    err = cb_data.get("error") or "Central bank data unavailable"
+    st.markdown(
+        f"<div class='strat-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
+        f"Central bank layer unavailable — {err}</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    # 1. Summary line + freshness caption.
+    st.markdown(
+        f"<div style='color:#e8e8e8;font-size:0.9rem;margin-bottom:2px;'>"
+        f"{cb_analysis.get('summary', '')}</div>"
+        f"<div style='color:#555;font-size:0.72rem;margin-bottom:0.75rem;'>"
+        f"{cb_analysis.get('data_note', 'World Bank annual data · updates quarterly')}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # 2. Two columns — buyers (green) on the left, sellers/stable on the right.
+    buyers = cb_analysis.get("buyers", []) or []
+    sellers = cb_analysis.get("sellers", []) or []
+    stable = cb_analysis.get("stable", []) or []
+
+    def _cb_rows(items, color):
+        if not items:
+            return "<div style='color:#555;font-size:0.8rem;'>None</div>"
+        rows = []
+        for it in items:
+            flag = it.get("flag", "")
+            rows.append(
+                f"<div style='font-size:0.85rem;margin:3px 0;'>"
+                f"{flag} {it['country']} "
+                f"<span style='color:{color};'>{it['change_pct']:+.1f}%</span></div>"
+            )
+        return "".join(rows)
+
+    stable_rows = (
+        "".join(
+            f"<div style='color:#888780;font-size:0.85rem;margin:3px 0;'>"
+            f"{COUNTRY_FLAGS_DASH.get(name, '')} {name}</div>"
+            for name in stable
+        )
+        if stable else "<div style='color:#555;font-size:0.8rem;'>None</div>"
+    )
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown(
+            f"<div class='metric-label'>Buyers</div>{_cb_rows(buyers, GREEN)}",
+            unsafe_allow_html=True,
+        )
+    with col_r:
+        st.markdown(
+            f"<div class='metric-label'>Sellers</div>{_cb_rows(sellers, RED)}"
+            f"<div class='metric-label' style='margin-top:0.75rem;'>Stable</div>"
+            f"{stable_rows}",
+            unsafe_allow_html=True,
+        )
+
+    # 3. Net reserve change across the tracked central banks.
+    net_pct = float(cb_analysis.get("net_change_pct", 0) or 0)
+    net_cls = ("metric-positive" if net_pct > 0
+               else "metric-negative" if net_pct < 0 else "metric-neutral")
+    st.markdown(
+        f"<div style='margin:0.9rem 0 0.4rem 0;font-size:0.85rem;color:#888;'>"
+        f"Net reserves change: "
+        f"<span class='{net_cls}' style='font-weight:500;'>{net_pct:+.2f}%</span> "
+        f"across tracked central banks</div>",
+        unsafe_allow_html=True,
+    )
+
+    # 4. Adjustment line — confirms (green) / conflicts (amber) / neutral (gray).
+    cb_dir = cb_adjustment.get("direction", "neutral")
+    cb_msg = cb_adjustment.get("message", "")
+    if cb_dir == "confirms":
+        st.markdown(f"<div class='opt-confirms'>✓ {cb_msg}</div>", unsafe_allow_html=True)
+    elif cb_dir == "conflicts":
+        st.markdown(f"<div class='opt-conflicts'>⚠️ {cb_msg}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='opt-neutral-msg'>{cb_msg}</div>", unsafe_allow_html=True)
+
+    # 5. Structural-context caveat.
+    st.markdown(
+        "<div style='color:#666;font-size:0.72rem;font-style:italic;margin-top:0.5rem;'>"
+        "⚠️ Annual data — use as structural context only, not a timing signal</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── news sentiment (last 48h) ──────────────────────────────────────────────────

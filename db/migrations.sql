@@ -31,3 +31,13 @@ ALTER TABLE signals
   ADD COLUMN IF NOT EXISTS options_pcr_oi numeric(6,3),
   ADD COLUMN IF NOT EXISTS options_adjustment numeric(5,1),
   ADD COLUMN IF NOT EXISTS options_iv_skew numeric(6,4);
+
+
+-- ── Migration: central-bank gold-buying layer (run in Supabase SQL editor) ──
+-- Adds the official-sector reserve columns written by run_daily.py. Safe to re-run.
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS cb_trend text,
+  ADD COLUMN IF NOT EXISTS cb_signal text,
+  ADD COLUMN IF NOT EXISTS cb_adjustment numeric(5,1),
+  ADD COLUMN IF NOT EXISTS cb_buyer_count integer,
+  ADD COLUMN IF NOT EXISTS cb_seller_count integer;

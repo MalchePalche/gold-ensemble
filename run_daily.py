@@ -280,6 +280,36 @@ def main() -> None:
     except Exception as e:
         print(f"\n  Options positioning unavailable: {e}")
 
+    # ── Central bank positioning (official-sector gold reserves) ────────────
+    cb_trend         = None
+    cb_signal        = None
+    cb_adj           = 0.0
+    cb_buyer_count   = None
+    cb_seller_count  = None
+    try:
+        from data.central_banks import get_cb_analysis
+        cb = get_cb_analysis(bias_str)
+        cb_an  = cb["analysis"]
+        cb_adj_d = cb["adjustment"]
+        if cb.get("error"):
+            print(f"\n  Central bank data unavailable: {cb['error']}")
+        else:
+            cb_trend        = cb_an["trend"]
+            cb_signal       = cb_an["signal"]
+            cb_adj          = float(cb_adj_d.get("adjustment", 0) or 0)
+            cb_buyer_count  = cb_an.get("buyer_count", 0)
+            cb_seller_count = cb_an.get("seller_count", 0)
+            # Fold the structural CB adjustment into the displayed confidence,
+            # on top of the options adjustment already applied above.
+            confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + cb_adj))
+            print(f"\n  CB trend: {cb_trend} "
+                  f"({cb_buyer_count} buying, {cb_seller_count} selling)")
+            print(f"  CB adjustment: {cb_adj:+.1f}%  "
+                  f"(running confidence -> {confidence_adjusted:.1f}%)")
+            print(f"  {cb_an.get('summary', '')}")
+    except Exception as e:
+        print(f"\n  Central bank data unavailable: {e}")
+
     # ── 8. Telegram alert ──────────────────────────────────────────────────
     size_thresh  = tg_cfg.get("size_change_threshold", 0.5)
     corr_alert   = corr_summary == "BREAKDOWN"
@@ -341,6 +371,11 @@ def main() -> None:
         "options_pcr_oi"         : round(options_pcr_oi, 3) if options_pcr_oi is not None else None,
         "options_iv_skew"        : round(options_iv_skew, 4) if options_iv_skew is not None else None,
         "options_adjustment"     : round(options_adj, 1),
+        "cb_trend"               : cb_trend,
+        "cb_signal"              : cb_signal,
+        "cb_adjustment"          : round(cb_adj, 1),
+        "cb_buyer_count"         : cb_buyer_count,
+        "cb_seller_count"        : cb_seller_count,
         "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
         "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],
         "s4_signal"              : per_strat["S4"]["bias"], "s4_driver": per_strat["S4"]["driver"],

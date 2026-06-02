@@ -198,6 +198,27 @@ st.markdown(
   .confirm-against { background: #2a1010; border: 1px solid #E24B4A;
                      border-radius: 8px; padding: 0.9rem 1rem;
                      color: #E24B4A; margin-bottom: 1rem; }
+  .confirm-enter-strong { background: #0a2008; border: 1px solid #4CAF50;
+                          border-radius: 8px; padding: 0.9rem 1rem;
+                          color: #4CAF50; margin-bottom: 1rem; }
+  .confirm-enter-weak { background: #1f1a0a; border: 1px solid #BA7517;
+                        border-radius: 8px; padding: 0.9rem 1rem;
+                        color: #BA7517; margin-bottom: 1rem; }
+  .confirm-reversal { background: #1a0a2a; border: 1px solid #7C3AED;
+                      border-radius: 8px; padding: 0.9rem 1rem;
+                      color: #7C3AED; margin-bottom: 1rem; }
+  .vol-strip { display: flex; gap: 1.5rem; font-size: 0.8rem;
+               color: #888; padding: 0.5rem 0; }
+  .vol-strip span { color: #e8e8e8; }
+  .vol-high { color: #639922; }
+  .vol-low { color: #888780; }
+  .vol-climax { background: #1f1a0a; border: 1px solid #BA7517;
+                border-radius: 6px; padding: 0.5rem 0.75rem;
+                color: #BA7517; font-size: 0.78rem; margin-top: 0.5rem; }
+  .size-note { background: #161616; border-radius: 6px;
+               padding: 0.5rem 0.75rem; color: #BA7517;
+               font-size: 0.78rem; margin-top: 0.5rem;
+               border-left: 2px solid #BA7517; }
   .confirm-reason { font-size: 0.85rem; font-weight: 500; }
   .confirm-sub { font-size: 0.78rem; margin-top: 4px; opacity: 0.8; }
   .session-card { background: #161616; border-radius: 8px;
@@ -396,38 +417,45 @@ else:
     pa = intraday.get("price_action") or {}
     sess = intraday.get("levels") or {}
 
-    # 1. Confirmation banner — full width.
+    # 1. Confirmation banner — full width. Signal may have been upgraded /
+    #    downgraded by the volume filter (ENTER STRONG / WEAK, WATCH CLOSELY,
+    #    POTENTIAL REVERSAL) so map each variant to its own color + icon.
     sig = confirm.get("signal", "WAIT")
     reason = confirm.get("reason", "")
-    if sig == "ENTER":
+    vol_note = confirm.get("volume_note", "")
+
+    _SIG_BANNER = {
+        "ENTER STRONG":       ("confirm-enter-strong", "✅✅ ENTRY CONFIRMED (STRONG)"),
+        "ENTER":              ("confirm-enter",        "✅ ENTRY CONFIRMED"),
+        "ENTER WEAK":         ("confirm-enter-weak",   "⚠️ ENTRY CONFIRMED (WEAK)"),
+        "WATCH CLOSELY":      ("confirm-wait",         "👁️ WATCH CLOSELY"),
+        "WAIT":               ("confirm-wait",         "⏳ WAITING FOR CONFIRMATION"),
+        "AGAINST":            ("confirm-against",      "🚫 PRICE ACTING AGAINST BIAS"),
+        "POTENTIAL REVERSAL": ("confirm-reversal",     "⚡ POTENTIAL REVERSAL"),
+    }
+    banner_cls, banner_label = _SIG_BANNER.get(sig, _SIG_BANNER["WAIT"])
+
+    # Sub-line: entry zone for ENTER variants, watched level while waiting.
+    if sig.startswith("ENTER"):
         zone = confirm.get("entry_zone")
         sub = f"Entry zone: {zone}" if zone else ""
-        st.markdown(
-            f"<div class='confirm-enter'>"
-            f"<div class='confirm-reason'>✅ ENTRY CONFIRMED — {reason}</div>"
-            + (f"<div class='confirm-sub'>{sub}</div>" if sub else "")
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-    elif sig == "AGAINST":
-        st.markdown(
-            f"<div class='confirm-against'>"
-            f"<div class='confirm-reason'>🚫 PRICE ACTING AGAINST BIAS — {reason}</div>"
-            f"<div class='confirm-sub'>Do not enter until price returns to "
-            f"bias direction</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-    else:  # WAIT
+    elif sig in ("WAIT", "WATCH CLOSELY"):
         key_level = confirm.get("key_level")
         sub = f"Watching: ${key_level}" if key_level is not None else ""
-        st.markdown(
-            f"<div class='confirm-wait'>"
-            f"<div class='confirm-reason'>⏳ WAITING FOR CONFIRMATION — {reason}</div>"
-            + (f"<div class='confirm-sub'>{sub}</div>" if sub else "")
-            + "</div>",
-            unsafe_allow_html=True,
-        )
+    elif sig == "AGAINST":
+        sub = "Do not enter until price returns to bias direction"
+    else:  # POTENTIAL REVERSAL
+        sub = ""
+
+    sub_html = f"<div class='confirm-sub'>{sub}</div>" if sub else ""
+    note_html = f"<div class='confirm-sub'>{vol_note}</div>" if vol_note else ""
+    st.markdown(
+        f"<div class='{banner_cls}'>"
+        f"<div class='confirm-reason'>{banner_label} — {reason}</div>"
+        f"{sub_html}{note_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
     # 2. Session levels row — London + NY, side by side.
     def _session_card(label: str, lv: dict | None) -> str:
@@ -485,6 +513,47 @@ else:
             f"EMA9 slope: <span>{slope_txt}</span>"
             f"Volume: <span>{vol_ratio:.1f}x avg</span>"
             f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # 4. Volume strip — volume context for the confirmation signal.
+    vol = intraday.get("volume") or {}
+    if vol:
+        vr = vol.get("vol_ratio", 1.0)
+        vt = vol.get("vol_trend", "flat")
+        vreg = vol.get("vol_regime", "NORMAL")
+        hvb = vol.get("high_vol_bars", 0)
+        trend_txt = {"rising": "↑rising", "falling": "↓falling",
+                     "flat": "→flat"}.get(vt, "→flat")
+        reg_cls = {"HIGH": "vol-high", "LOW": "vol-low"}.get(vreg, "")
+        reg_html = (f"<span class='{reg_cls}'>{vreg}</span>" if reg_cls
+                    else f"<span>{vreg}</span>")
+        st.markdown(
+            f"<div class='vol-strip'>"
+            f"Vol ratio: <span>{vr:.1f}x avg</span>"
+            f"Trend: <span>{trend_txt}</span>"
+            f"Regime: {reg_html}"
+            f"High vol bars (last 20): <span>{hvb}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # 5. Climax warning bar — volume exhaustion flag.
+        if vol.get("climax"):
+            cdir = vol.get("climax_direction") or ""
+            st.markdown(
+                f"<div class='vol-climax'>⚠️ Volume climax detected — "
+                f"{cdir} exhaustion</div>",
+                unsafe_allow_html=True,
+            )
+
+    # 6. Suggested size note — when volume reduces the V4 position size.
+    size_mod = confirm.get("size_modifier", 1.0)
+    if size_mod < 1.0 and "ENTER" in sig:
+        vq = confirm.get("volume_quality", "")
+        st.markdown(
+            f"<div class='size-note'>Suggested size: {pos * size_mod:.2f}x "
+            f"(reduced for {vq} volume)</div>",
             unsafe_allow_html=True,
         )
 

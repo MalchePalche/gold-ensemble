@@ -303,6 +303,168 @@ def get_confirmation_signal(
     }
 
 
+def get_volume_profile(df: pd.DataFrame,
+                       lookback_bars: int = 50) -> dict:
+    """
+    Analyze volume profile over last 50 bars (5m = ~4 hours).
+    Returns:
+    - avg_volume: baseline average
+    - current_volume: last completed bar volume
+    - vol_ratio: current / average
+    - vol_trend: rising / falling / flat (last 5 bars vs prior 5)
+    - high_vol_bars: count of bars with vol > 1.5x avg in last 20
+    - vol_regime: HIGH / NORMAL / LOW
+    - climax: bool — single bar with vol > 3x avg (exhaustion signal)
+    - climax_direction: UP / DOWN / None
+    """
+    if len(df) < lookback_bars:
+        return {}
+
+    recent = df.tail(lookback_bars)
+    avg_vol = float(recent['Volume'].mean())
+    current_vol = float(df['Volume'].iloc[-2])  # last completed bar
+    current_price = float(df['Close'].iloc[-2])
+    prev_price = float(df['Close'].iloc[-3])
+    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+
+    # Volume trend — last 5 bars vs prior 5
+    last5_vol = float(df['Volume'].iloc[-6:-1].mean())
+    prior5_vol = float(df['Volume'].iloc[-11:-6].mean())
+    if last5_vol > prior5_vol * 1.15:
+        vol_trend = 'rising'
+    elif last5_vol < prior5_vol * 0.85:
+        vol_trend = 'falling'
+    else:
+        vol_trend = 'flat'
+
+    # High volume bars in last 20
+    last20 = df.tail(20)
+    high_vol_bars = int((last20['Volume'] > avg_vol * 1.5).sum())
+
+    # Vol regime
+    if vol_ratio > 1.5:
+        vol_regime = 'HIGH'
+    elif vol_ratio < 0.7:
+        vol_regime = 'LOW'
+    else:
+        vol_regime = 'NORMAL'
+
+    # Climax detection — exhaustion signal
+    climax = vol_ratio > 3.0
+    if climax:
+        climax_direction = 'UP' if current_price > prev_price else 'DOWN'
+    else:
+        climax_direction = None
+
+    return {
+        'avg_volume': round(avg_vol, 0),
+        'current_volume': round(current_vol, 0),
+        'vol_ratio': round(vol_ratio, 2),
+        'vol_trend': vol_trend,
+        'high_vol_bars': high_vol_bars,
+        'vol_regime': vol_regime,
+        'climax': climax,
+        'climax_direction': climax_direction,
+    }
+
+
+def apply_volume_filter(confirmation: dict,
+                        volume: dict,
+                        daily_bias: str) -> dict:
+    """
+    Upgrade or downgrade the confirmation signal based on volume.
+
+    Rules:
+    ENTER + HIGH vol + rising trend → ENTER STRONG (highest quality)
+    ENTER + NORMAL vol              → ENTER (unchanged)
+    ENTER + LOW vol                 → ENTER WEAK (reduce size 50%)
+    WAIT + HIGH vol + rising        → WATCH CLOSELY (move may be imminent)
+    AGAINST + climax opposite bias  → POTENTIAL REVERSAL (volume exhaustion)
+    Any signal + climax same dir    → add exhaustion warning
+
+    Returns updated confirmation dict with:
+    - signal: updated signal string
+    - volume_quality: STRONG / NORMAL / WEAK
+    - volume_note: explanation string
+    - size_modifier: multiplier to apply to V4 position size
+    """
+    if not volume or not confirmation:
+        return confirmation
+
+    sig = confirmation.get('signal', 'WAIT')
+    vol_regime = volume.get('vol_regime', 'NORMAL')
+    vol_trend = volume.get('vol_trend', 'flat')
+    climax = volume.get('climax', False)
+    climax_dir = volume.get('climax_direction')
+    vol_ratio = volume.get('vol_ratio', 1.0)
+
+    # Climax check first — overrides everything
+    if climax:
+        if ((daily_bias == 'BULLISH' and climax_dir == 'UP') or
+                (daily_bias == 'BEARISH' and climax_dir == 'DOWN')):
+            # Climax in direction of bias = exhaustion warning
+            confirmation['volume_note'] = (
+                f'⚠️ Volume climax detected ({vol_ratio:.1f}x avg) '
+                f'in direction of bias — potential exhaustion, '
+                f'consider waiting for pullback entry')
+            confirmation['volume_quality'] = 'CLIMAX'
+            confirmation['size_modifier'] = 0.5
+            return confirmation
+        else:
+            # Climax against bias = reversal signal
+            confirmation['signal'] = 'POTENTIAL REVERSAL'
+            confirmation['volume_note'] = (
+                f'⚡ Volume climax ({vol_ratio:.1f}x avg) '
+                f'against {daily_bias} bias — exhaustion reversal possible')
+            confirmation['volume_quality'] = 'CLIMAX'
+            confirmation['size_modifier'] = 0.0
+            return confirmation
+
+    if sig == 'ENTER':
+        if vol_regime == 'HIGH' and vol_trend == 'rising':
+            confirmation['signal'] = 'ENTER STRONG'
+            confirmation['volume_note'] = (
+                f'Volume {vol_ratio:.1f}x avg and rising — '
+                f'strong institutional participation')
+            confirmation['volume_quality'] = 'STRONG'
+            confirmation['size_modifier'] = 1.0  # full size
+        elif vol_regime == 'LOW':
+            confirmation['signal'] = 'ENTER WEAK'
+            confirmation['volume_note'] = (
+                f'Volume only {vol_ratio:.1f}x avg — '
+                f'weak participation, reduce position 50%')
+            confirmation['volume_quality'] = 'WEAK'
+            confirmation['size_modifier'] = 0.5
+        else:
+            confirmation['volume_note'] = (
+                f'Volume {vol_ratio:.1f}x avg — normal participation')
+            confirmation['volume_quality'] = 'NORMAL'
+            confirmation['size_modifier'] = 1.0
+
+    elif sig == 'WAIT':
+        if vol_regime == 'HIGH' and vol_trend == 'rising':
+            confirmation['signal'] = 'WATCH CLOSELY'
+            confirmation['volume_note'] = (
+                f'Volume rising ({vol_ratio:.1f}x avg) '
+                f'while waiting — breakout may be imminent')
+            confirmation['volume_quality'] = 'STRONG'
+            confirmation['size_modifier'] = 0.0
+        else:
+            confirmation['volume_note'] = (
+                f'Volume {vol_ratio:.1f}x avg')
+            confirmation['volume_quality'] = 'NORMAL'
+            confirmation['size_modifier'] = 0.0
+
+    elif sig == 'AGAINST':
+        confirmation['volume_note'] = (
+            f'Volume {vol_ratio:.1f}x avg — '
+            f'price acting against bias, stay flat')
+        confirmation['volume_quality'] = 'NORMAL'
+        confirmation['size_modifier'] = 0.0
+
+    return confirmation
+
+
 def get_intraday_analysis(daily_bias: str) -> dict:
     """Main entry point."""
     try:
@@ -313,12 +475,16 @@ def get_intraday_analysis(daily_bias: str) -> dict:
         price_action = get_current_price_action(df)
         confirmation = get_confirmation_signal(
             df, daily_bias, levels, price_action)
+        volume = get_volume_profile(df)
+        confirmation = apply_volume_filter(
+            confirmation, volume, daily_bias)
         return {
             'ticker': ticker,
             'spot_premium': premium,
             'levels': levels,
             'price_action': price_action,
             'confirmation': confirmation,
+            'volume': volume,
             'error': None
         }
     except Exception as e:

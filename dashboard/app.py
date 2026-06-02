@@ -240,7 +240,7 @@ def load_correlations():
 
 @st.cache_data(ttl=1800, show_spinner=False)  # refresh every 30 min
 def load_sentiment():
-    """News sentiment over the last 24h (signal, counts, headlines)."""
+    """News sentiment over the last 48h (signal, counts, headlines)."""
     from data.sentiment import get_sentiment
     return get_sentiment()
 
@@ -582,7 +582,7 @@ st.markdown(
 )
 
 
-# ── news sentiment (last 24h) ──────────────────────────────────────────────────
+# ── news sentiment (last 48h) ──────────────────────────────────────────────────
 import html as _html
 
 st.markdown('<div class="section-header">News sentiment</div>', unsafe_allow_html=True)
@@ -590,7 +590,7 @@ st.markdown('<div class="section-header">News sentiment</div>', unsafe_allow_htm
 if not sentiment or sentiment.get("total", 0) == 0:
     st.markdown(
         "<div class='sentiment-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
-        "No gold-relevant headlines in the last 24h "
+        "No gold-relevant headlines in the last 48h "
         "(or NEWSAPI_KEY not configured)</div>",
         unsafe_allow_html=True,
     )
@@ -604,7 +604,7 @@ else:
     st.markdown(
         f"<div style='display:flex;justify-content:space-between;align-items:center;"
         f"margin-bottom:0.75rem;'>"
-        f"<div class='sentiment-label' style='font-size:0.8rem;'>Last 24h</div>"
+        f"<div class='sentiment-label' style='font-size:0.8rem;'>Last 48h</div>"
         f"<div><span class='badge-{sk}'>{sig}</span>"
         f"<span class='sentiment-label' style='margin-left:8px;'>{sconf:.0f}% conf</span></div>"
         f"</div>",

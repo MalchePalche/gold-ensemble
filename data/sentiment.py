@@ -13,6 +13,7 @@ fails, every entry point degrades gracefully to an empty/neutral result.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta
 
 import pytz
@@ -28,10 +29,49 @@ GOLD_QUERIES = [
     "inflation gold", "gold futures",
 ]
 
+# The title must mention gold as a whole word (so "golden", "Goldman",
+# "Goldberg" don't match). XAU / bullion also qualify.
+_GOLD_TITLE_RE = re.compile(r"\b(gold|xau|bullion)\b", re.IGNORECASE)
 
-def fetch_headlines(hours_back: int = 24) -> list[dict]:
+# A headline only counts as gold-relevant if it also reads like a markets
+# story — at least one of these context words must appear in title+description.
+_MARKET_CONTEXT = (
+    "price", "prices", "futures", "rally", "rallies", "selloff", "sell-off",
+    "ounce", "spot", "fed", "federal reserve", "inflation", "dollar", "yield",
+    "yields", "safe haven", "safe-haven", "trading", "trade", "market",
+    "markets", "troy", "investor", "rate", "rates", "hedge", "usd", "etf",
+    "comex", "bullion", "central bank", "demand", "tola", "10g", "10 gms",
+)
+
+# Common non-financial / commercial uses of "gold" to throw out (sports,
+# entertainment, product names, retail deals, "liquid gold" metaphors, etc).
+_NOISE_TOKENS = (
+    "gold medal", "gold medals", "medalist", "medallist", "olympic", "olympics",
+    "world cup", "trophy", "tournament", "champion", "championship", "league",
+    "wrestler", "wrestling", "rugby", "football", "soccer", "cricket", "tennis",
+    "anime", "movie", "album", "song", "netflix", "box office", "gold coast",
+    "goldfish", "gold rush", "gold star", "pokemon", "pokémon",
+    "gold label", "80+ gold", "rrp", "whisky", "whiskey", "scotch", "psu",
+    "delivered @", "liquid gold", "colostrum",
+)
+
+
+def _is_gold_relevant(title: str, text: str) -> bool:
+    """True only for headlines that are about gold-the-asset, not 'gold medal'."""
+    if not _GOLD_TITLE_RE.search(title):
+        return False
+    low = text.lower()
+    if any(tok in low for tok in _NOISE_TOKENS):
+        return False
+    return any(ctx in low for ctx in _MARKET_CONTEXT)
+
+
+def fetch_headlines(hours_back: int = 48) -> list[dict]:
     """
-    Fetch gold-relevant headlines from last 24 hours.
+    Fetch gold-relevant headlines from the last `hours_back` hours.
+
+    Requires "gold"/XAU/bullion in the article title (NewsAPI qInTitle), then
+    applies a local relevance filter to keep only genuine markets stories.
     Returns list of dicts with title, source, published, url.
     """
     if not NEWSAPI_KEY:
@@ -40,17 +80,15 @@ def fetch_headlines(hours_back: int = 24) -> list[dict]:
     from_time = (datetime.utcnow() - timedelta(hours=hours_back))\
                 .strftime("%Y-%m-%dT%H:%M:%S")
 
-    query = 'gold price OR XAU/USD OR "gold futures" OR "gold rally"'
-
     try:
         r = requests.get(
             "https://newsapi.org/v2/everything",
             params={
-                "q": query,
+                "qInTitle": "gold OR XAU OR bullion",
                 "from": from_time,
                 "language": "en",
                 "sortBy": "publishedAt",
-                "pageSize": 30,
+                "pageSize": 50,
                 "apiKey": NEWSAPI_KEY,
             },
             timeout=10,
@@ -66,13 +104,16 @@ def fetch_headlines(hours_back: int = 24) -> list[dict]:
         description = a.get("description", "") or ""
         if not title:
             continue
+        text = f"{title}. {description}"
+        if not _is_gold_relevant(title, text):
+            continue
         results.append({
             "title": title,
             "description": description,
             "source": a.get("source", {}).get("name", ""),
             "published": a.get("publishedAt", ""),
             "url": a.get("url", ""),
-            "text": f"{title}. {description}",
+            "text": text,
         })
 
     return results
@@ -150,7 +191,7 @@ def score_sentiment(headlines: list[dict]) -> dict:
 
 def get_sentiment() -> dict:
     """Main entry point — fetch + score."""
-    headlines = fetch_headlines(hours_back=24)
+    headlines = fetch_headlines(hours_back=48)
     return score_sentiment(headlines)
 
 

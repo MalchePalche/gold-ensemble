@@ -41,3 +41,14 @@ ALTER TABLE signals
   ADD COLUMN IF NOT EXISTS cb_adjustment numeric(5,1),
   ADD COLUMN IF NOT EXISTS cb_buyer_count integer,
   ADD COLUMN IF NOT EXISTS cb_seller_count integer;
+
+
+-- ── Migration: forward-test auto-evaluation (run in Supabase SQL editor) ────
+-- Adds the columns persisted by data.forward_test.auto_evaluate_pending(),
+-- which scores each non-neutral signal against the actual next-day gold move.
+-- Safe to re-run.
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS next_day_return numeric(8,4),
+  ADD COLUMN IF NOT EXISTS evaluated boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS correct boolean,
+  ADD COLUMN IF NOT EXISTS evaluation_date date;

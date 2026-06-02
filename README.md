@@ -126,6 +126,19 @@ Arguments: D:\MyDesktop\Trading_Ensemble\gold_ensemble\run_daily.py
 Trigger:   Daily at 18:30
 ```
 
+### Intraday NY Session Alerts (every 5 minutes)
+Windows Task Scheduler:
+- Name: Gold Intraday Alerts
+- Trigger: Daily, repeat every 5 minutes
+  Start: 16:25 Sofia time (13:25 UTC)
+  Stop after: 7 hours (covers full NY session until 23:25)
+- Action: python D:\path\to\gold_ensemble\run_intraday_alerts.py
+- Start in: D:\path\to\gold_ensemble
+
+This runs every 5 minutes from 16:25–23:25 Sofia time.
+Alerts only fire when the intraday signal STATE changes.
+Silent when signal is unchanged.
+
 ## Signal output — results/signals.csv
 
 | Column         | Description                                      |

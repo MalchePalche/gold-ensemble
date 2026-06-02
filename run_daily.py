@@ -11,8 +11,8 @@ What it does:
   4. Runs full V4 simulation to derive today's position with CB + smoothing
   5. Compares with yesterday's signal from Supabase
   6. Prints a one-page console summary
-  7. Sends Telegram alert if bias flipped OR position changed >= 0.5x
-  8. Upserts today's row into the Supabase `signals` table
+  7. Upserts today's row into the Supabase `signals` table
+  8. Sends a daily-brief Telegram message (always), flagging anything changed
 """
 
 from __future__ import annotations
@@ -43,6 +43,8 @@ STRAT_NAMES = {
     "S5": "MACD (12/26/9)",
 }
 BIAS_OF = {1: "BULLISH", 0: "NEUTRAL", -1: "BEARISH"}
+# Compact strategy-direction glyphs for the daily brief.
+ARROW_OF = {"BULLISH": "UP", "BEARISH": "DN", "NEUTRAL": "--"}
 
 # GC=F futures trade ~$25 above spot XAU/USD. Subtract the premium so every
 # stored/displayed price level is on the spot scale (matches the intraday
@@ -69,15 +71,15 @@ def _load_previous(today_date: str) -> dict | None:
         return None
 
 
-def _send_telegram(bot_token: str, chat_id: str, message: str) -> None:
+def _send_telegram(bot_token: str, chat_id: str, message: str,
+                   parse_mode: str | None = "HTML") -> None:
     import requests
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
-        r = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
-            timeout=10,
-        )
+        r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
         print("[telegram] Alert sent.")
     except Exception as e:
@@ -259,10 +261,14 @@ def main() -> None:
     print("=" * 62)
 
     # ── Economic calendar (high-impact USD events) ──────────────────────────
+    cal_risk   = "LOW"
+    cal_events = []
     try:
         from data.calendar import get_todays_events, event_risk_score
         today_events = get_todays_events()
         risk = event_risk_score(today_events)
+        cal_risk   = risk
+        cal_events = today_events
         print(f"\n  Economic risk today: {risk}")
         if today_events:
             for e in today_events:
@@ -360,50 +366,8 @@ def main() -> None:
     except Exception as e:
         print(f"\n  Central bank data unavailable: {e}")
 
-    # ── 8. Telegram alert ──────────────────────────────────────────────────
-    size_thresh  = tg_cfg.get("size_change_threshold", 0.5)
-    corr_alert   = corr_summary == "BREAKDOWN"
-    sent_alert   = sent_diverge
-    should_alert = (
-        tg_cfg.get("enabled", False) and
-        (bias_flip or abs(pos_change) >= size_thresh or corr_alert or sent_alert)
-    )
-
-    if should_alert:
-        # Secrets come from the environment first, config.yaml as fallback.
-        bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or tg_cfg.get("bot_token", "")
-        chat_id   = os.getenv("TELEGRAM_CHAT_ID")   or tg_cfg.get("chat_id", "")
-        if bot_token and "YOUR" not in bot_token and chat_id and "YOUR" not in chat_id:
-            lines = [
-                f"<b>Gold Ensemble V4  --  {today_date}</b>",
-                f"XAU/USD: <b>${today_close:,.2f}</b>",
-                "",
-            ]
-            if bias_flip:
-                lines.append(f"BIAS FLIP: {prev_bias} -> <b>{bias_str}</b>")
-            lines += [
-                f"Bias:  <b>{bias_str}</b>  ({today_conf:.1f}% conf)",
-                f"Vol:   {today_vol.upper()}  (ATR {today_atr:.2f}x  RV {today_rv:.0%})",
-                f"Pos:   <b>{today_pos:.2f}x</b>  (was {prev_pos:.2f}x, "
-                f"change {pos_change:+.2f}x)",
-            ]
-            if cb_active:
-                lines.append("Circuit breaker ACTIVE")
-            if corr_alert:
-                lines.append("")
-                lines.append("⚠️ Correlation breakdown detected — regime change possible")
-                for v in corr_breaks:
-                    lines.append(f"  {v['label']}: {v['breakdown_msg']}")
-            if sent_alert and sentiment is not None:
-                lines.append("")
-                lines.append(f"⚡ SENTIMENT DIVERGENCE: News {sentiment['signal']} "
-                             f"vs Ensemble {bias_str}")
-                lines.append("Price often follows sentiment within 1-3 days")
-            _send_telegram(bot_token, chat_id, "\n".join(lines))
-        else:
-            print("[telegram] Alert triggered but bot_token/chat_id not configured.")
-    elif tg_cfg.get("enabled", False):
-        print("[telegram] No significant change — alert suppressed.")
+    # ── 8. Change flags (folded into the daily brief, no longer gate it) ────
+    corr_alert = corr_summary == "BREAKDOWN"
 
     # ── 9. Upsert today's row into Supabase ─────────────────────────────────
     row = {
@@ -437,6 +401,99 @@ def main() -> None:
     except Exception as e:
         print(f"\n[run_daily] Failed to save signal to Supabase: {e}")
         raise
+
+    # ── 10. Daily brief Telegram message (always sent) ──────────────────────
+    # Unlike the old change-gated alert, the brief goes out every run so there
+    # is a daily heartbeat; the change flags computed in §8 only decide which
+    # extra lines get appended.
+    if not tg_cfg.get("enabled", False):
+        print("[telegram] Disabled — daily brief not sent.")
+        return
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or tg_cfg.get("bot_token", "")
+    chat_id   = os.getenv("TELEGRAM_CHAT_ID")   or tg_cfg.get("chat_id", "")
+    if not (bot_token and "YOUR" not in bot_token and chat_id and "YOUR" not in chat_id):
+        print("[telegram] Daily brief skipped — bot_token/chat_id not configured.")
+        return
+
+    # Forward-test track record (stored outcomes from Supabase).
+    ft_evaluated, ft_win_rate = 0, None
+    try:
+        from data.forward_test import get_forward_test_analysis
+        ft_stats = get_forward_test_analysis().get("stats", {})
+        ft_evaluated = ft_stats.get("evaluated", 0) or 0
+        ft_win_rate  = ft_stats.get("win_rate")
+    except Exception as e:
+        print(f"[run_daily] Forward-test stats unavailable: {e}")
+
+    # Calendar line: name the event(s) when the day carries high-impact risk.
+    if cal_risk == "HIGH" and cal_events:
+        cal_line = "HIGH IMPACT: " + ", ".join(e["title"] for e in cal_events)
+    elif cal_events:
+        cal_line = f"{cal_risk}: " + ", ".join(e["title"] for e in cal_events)
+    else:
+        cal_line = "LOW"
+
+    sentiment_line = (
+        f"{sentiment['signal']} ({sentiment['confidence']}%)"
+        if sentiment is not None else "n/a"
+    )
+    if sent_diverge:
+        sentiment_line += " ⚡DIVERGENCE"
+
+    options_line = (
+        f"{options_signal} PCR {options_pcr_oi}"
+        if options_signal is not None else "n/a"
+    )
+
+    score_val = float(series.score.iloc[-1])
+    brief = [
+        f"🥇 GOLD DAILY BRIEF — {today_date}",
+        "",
+        f"Price: ${today_close:,.2f} (spot-adjusted)",
+        "━" * 20,
+        f"BIAS: {bias_str} {today_conf:.0f}%",
+        f"Position: {today_pos:.2f}x | Vol: {today_vol}",
+        f"Signal score: {score_val:+.3f}",
+        "",
+        "📊 Strategies",
+        f"S1 MA: {ARROW_OF[per_strat['S1']['bias']]} | "
+        f"S2 Donchian: {ARROW_OF[per_strat['S2']['bias']]}",
+        f"S4 52W: {ARROW_OF[per_strat['S4']['bias']]} | "
+        f"S5 MACD: {ARROW_OF[per_strat['S5']['bias']]}",
+        "",
+        "🌍 Context",
+        f"Correlations: {corr_summary}",
+        f"Sentiment: {sentiment_line}",
+        f"Options: {options_line}",
+        f"CB trend: {cb_trend if cb_trend else 'n/a'}",
+        f"Calendar: {cal_line}",
+        "",
+        "📈 Confidence",
+        f"Base: {today_conf:.0f}% → Adjusted: {confidence_adjusted:.0f}%",
+        f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}%",
+    ]
+
+    if bias_flip:
+        brief += ["", f"🔄 SIGNAL CHANGED: {prev_bias} → {bias_str}"]
+    if corr_alert:
+        brief += ["", "⚠️ Correlation breakdown active"]
+    if sent_diverge and sentiment is not None:
+        brief += ["", f"⚡ Sentiment divergence: news {sentiment['signal']} "
+                      f"vs ensemble {bias_str}"]
+    if cb_trend in ("REDUCING", "ACCUMULATING"):
+        brief += ["", f"🏦 CB trend: {cb_trend} "
+                      f"({cb_buyer_count} buying, {cb_seller_count} selling)"]
+
+    brief += [""]
+    if ft_evaluated < 5 or ft_win_rate is None:
+        brief.append("Forward test: Insufficient data")
+    else:
+        brief.append(f"Forward test: {ft_evaluated} signals evaluated | "
+                     f"Win rate: {ft_win_rate}%")
+
+    # Plain text (no HTML parse mode) — the brief uses only emoji/box glyphs.
+    _send_telegram(bot_token, chat_id, "\n".join(brief), parse_mode=None)
 
 
 if __name__ == "__main__":

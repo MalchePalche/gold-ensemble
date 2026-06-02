@@ -75,6 +75,10 @@ st.markdown(
   .signal-sub { font-size: 0.8rem; color: #888; margin-top: 4px; }
   .conf-pct { font-size: 1.8rem; font-weight: 500; color: #e8e8e8; text-align: right; }
   .conf-label { font-size: 0.75rem; color: #888; text-align: right; }
+  .conf-tag { font-size: 0.7rem; text-align: right; margin-top: 4px; }
+  .conf-tag-pos { color: #639922; }
+  .conf-tag-neg { color: #E24B4A; }
+  .conf-tag-neutral { color: #888; }
 
   /* metric cards */
   .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1rem; }
@@ -165,6 +169,20 @@ st.markdown(
   .corr-interp { font-size: 0.8rem; color: #888; margin-top: 0.75rem;
                  padding: 0.6rem 0.75rem; background: #161616;
                  border-radius: 6px; border-left: 2px solid #1e1e1e; }
+
+  /* options / OI positioning */
+  .opt-unusual { background: #1f1a0a; border: 1px solid #BA7517;
+                 border-radius: 8px; padding: 0.75rem 1rem; color: #BA7517;
+                 font-size: 0.85rem; margin: 0.75rem 0; }
+  .opt-confirms { color: #639922; font-size: 0.82rem; margin: 0.75rem 0;
+                  padding: 0.6rem 0.75rem; background: #0f1f08;
+                  border-radius: 6px; border-left: 2px solid #639922; }
+  .opt-conflicts { background: #1f1a0a; border: 1px solid #BA7517;
+                   border-radius: 8px; padding: 0.75rem 1rem; color: #BA7517;
+                   font-size: 0.82rem; margin: 0.75rem 0; }
+  .opt-neutral-msg { color: #888; font-size: 0.82rem; margin: 0.75rem 0;
+                     padding: 0.6rem 0.75rem; background: #161616;
+                     border-radius: 6px; border-left: 2px solid #1e1e1e; }
 
   /* news sentiment */
   .sentiment-card { border: 1px solid #1e1e1e; border-radius: 12px;
@@ -294,6 +312,13 @@ def load_intraday(bias: str):
     return get_intraday_analysis(bias)
 
 
+@st.cache_data(ttl=900, show_spinner=False)  # refresh every 15 min
+def load_options(bias: str):
+    """Options/OI layer: GLD put/call positioning + confidence adjustment."""
+    from data.options_flow import get_options_analysis
+    return get_options_analysis(bias)
+
+
 # ── load ─────────────────────────────────────────────────────────────────────
 try:
     signal = latest_signal()
@@ -329,6 +354,14 @@ try:
     intraday = load_intraday(bias)
 except Exception as e:
     intraday = {"error": str(e)}
+
+try:
+    options_data = load_options(bias)
+except Exception as e:
+    options_data = {"positioning": {}, "adjustment": {}, "error": str(e)}
+
+positioning = options_data.get("positioning", {}) or {}
+adjustment = options_data.get("adjustment", {}) or {}
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -371,6 +404,21 @@ with top_r:
 conf = float(signal["confidence"])
 pos  = float(signal["position_size"])
 
+# Options-positioning adjustment (display only — Supabase keeps the clean signal).
+opt_adj = float(adjustment.get("adjustment", 0) or 0)
+adjusted_confidence = min(100, max(0, conf + opt_adj))
+
+# Small "base · options" tag under the headline confidence number.
+if opt_adj > 0:
+    tag_cls, tag_sign = "conf-tag-pos", f"+{opt_adj:.1f}"
+elif opt_adj < 0:
+    tag_cls, tag_sign = "conf-tag-neg", f"{opt_adj:.1f}"
+else:
+    tag_cls, tag_sign = "conf-tag-neutral", "0"
+conf_tag_html = (
+    f"<div class='conf-tag {tag_cls}'>base: {conf:.1f}% · options: {tag_sign}%</div>"
+)
+
 # Count strategies aligned with the headline bias.
 strat_keys = ("s1", "s2", "s4", "s5")
 aligned = [k for k in strat_keys if signal.get(f"{k}_signal") == bias]
@@ -390,11 +438,12 @@ st.markdown(
     <div class="signal-sub">Position size · <b style="color:#e8e8e8;">{pos:.2f}x</b></div>
   </div>
   <div style="min-width:160px;">
-    <div class="conf-pct">{conf:.1f}%</div>
+    <div class="conf-pct">{adjusted_confidence:.1f}%</div>
     <div class="conf-label">CONFIDENCE</div>
     <div style="background:#1a1a1a;border-radius:6px;height:6px;width:100%;margin-top:8px;">
-      <div style="background:{bias_hex(bias)};height:6px;border-radius:6px;width:{min(max(conf,0),100):.0f}%;"></div>
+      <div style="background:{bias_hex(bias)};height:6px;border-radius:6px;width:{min(max(adjusted_confidence,0),100):.0f}%;"></div>
     </div>
+    {conf_tag_html}
   </div>
 </div>
 """,
@@ -790,6 +839,82 @@ st.markdown(
     f"<div class='corr-interp'>{_CORR_INTERP.get(corr_summary, '')}</div>",
     unsafe_allow_html=True,
 )
+
+
+# ── options positioning (GLD put/call) ─────────────────────────────────────────
+opt_signal = positioning.get("signal", "NEUTRAL")
+opt_sk = bias_key(opt_signal)
+
+st.markdown(
+    f"<div style='display:flex;justify-content:space-between;align-items:center;"
+    f"margin-bottom:0.75rem;'>"
+    f"<div class='section-header' style='margin-bottom:0;'>Options positioning</div>"
+    f"<div class='badge-{opt_sk}'>{opt_signal}</div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+if positioning.get("error") or positioning.get("pcr_oi") is None:
+    err = positioning.get("error") or "Options data unavailable"
+    st.markdown(
+        f"<div class='strat-card' style='color:#888;font-size:0.85rem;text-align:center;'>"
+        f"Options layer unavailable — {err}</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    pcr_oi = float(positioning["pcr_oi"])
+    pcr_vol = float(positioning["pcr_vol"])
+    opt_score = float(positioning.get("score", 0) or 0)
+
+    def _pcr_cls(pcr: float) -> str:
+        # Low PCR = more calls = bullish (green); high PCR = bearish (red).
+        if pcr < 0.8:
+            return "metric-positive"
+        if pcr > 1.2:
+            return "metric-negative"
+        return "metric-neutral"
+
+    score_cls = ("metric-positive" if opt_score > 0
+                 else "metric-negative" if opt_score < 0 else "metric-neutral")
+
+    # Three metric cards: OI PCR, Volume PCR, net positioning score.
+    st.markdown(
+        f"""
+<div class="metric-grid" style="grid-template-columns: repeat(3, 1fr);">
+  <div class="metric-card">
+    <div class="metric-label">OI Put/Call</div>
+    <div class="metric-value {_pcr_cls(pcr_oi)}">{pcr_oi:.2f}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Volume Put/Call</div>
+    <div class="metric-value {_pcr_cls(pcr_vol)}">{pcr_vol:.2f}</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Net positioning</div>
+    <div class="metric-value {score_cls}">{opt_score:+.2f}</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # Unusual activity → amber alert.
+    unusual = positioning.get("unusual")
+    if unusual:
+        st.markdown(
+            f"<div class='opt-unusual'>⚡ {unusual}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Adjustment line — confirms (green) / conflicts (amber) / neutral (gray).
+    direction = adjustment.get("direction", "neutral")
+    msg = adjustment.get("message", "")
+    if direction == "confirms":
+        st.markdown(f"<div class='opt-confirms'>✓ {msg}</div>", unsafe_allow_html=True)
+    elif direction == "conflicts":
+        st.markdown(f"<div class='opt-conflicts'>⚠️ {msg}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='opt-neutral-msg'>{msg}</div>", unsafe_allow_html=True)
 
 
 # ── news sentiment (last 48h) ──────────────────────────────────────────────────

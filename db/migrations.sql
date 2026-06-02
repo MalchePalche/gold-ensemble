@@ -21,3 +21,12 @@ CREATE TABLE signals (
 );
 
 CREATE INDEX idx_signals_date ON signals(date DESC);
+
+
+-- ── Migration: options / OI layer (run in Supabase SQL editor) ──────────────
+-- Adds the options-positioning columns written by run_daily.py. Safe to re-run.
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS confidence_adjusted numeric(5,2),
+  ADD COLUMN IF NOT EXISTS options_signal text,
+  ADD COLUMN IF NOT EXISTS options_pcr_oi numeric(6,3),
+  ADD COLUMN IF NOT EXISTS options_adjustment numeric(5,1);

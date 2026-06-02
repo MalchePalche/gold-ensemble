@@ -253,6 +253,31 @@ def main() -> None:
     except Exception as e:
         print(f"\n  News sentiment unavailable: {e}")
 
+    # ── Options / OI positioning (GLD put/call) ─────────────────────────────
+    options_signal = None
+    options_pcr_oi = None
+    options_adj    = 0.0
+    confidence_adjusted = today_conf
+    try:
+        from data.options_flow import get_options_analysis
+        options = get_options_analysis(bias_str)
+        pos_data = options["positioning"]
+        adj      = options["adjustment"]
+        if options.get("error"):
+            print(f"\n  Options positioning unavailable: {options['error']}")
+        else:
+            options_signal = pos_data["signal"]
+            options_pcr_oi = pos_data["pcr_oi"]
+            options_adj    = float(adj.get("adjustment", 0) or 0)
+            confidence_adjusted = min(100.0, max(0.0, today_conf + options_adj))
+            print(f"\n  Options signal: {options_signal} (PCR: {options_pcr_oi})")
+            print(f"  Confidence adjustment: {options_adj:+.1f}%  "
+                  f"({today_conf:.1f}% -> {confidence_adjusted:.1f}%)")
+            if pos_data.get("unusual"):
+                print(f"  {pos_data['unusual']}")
+    except Exception as e:
+        print(f"\n  Options positioning unavailable: {e}")
+
     # ── 8. Telegram alert ──────────────────────────────────────────────────
     size_thresh  = tg_cfg.get("size_change_threshold", 0.5)
     corr_alert   = corr_summary == "BREAKDOWN"
@@ -309,6 +334,10 @@ def main() -> None:
         "vol_regime"             : today_vol,
         "sma_200"                : round(sma_200, 2) if sma_200 is not None else None,
         "circuit_breaker_active" : bool(cb_active),
+        "confidence_adjusted"    : round(confidence_adjusted, 2),
+        "options_signal"         : options_signal,
+        "options_pcr_oi"         : round(options_pcr_oi, 3) if options_pcr_oi is not None else None,
+        "options_adjustment"     : round(options_adj, 1),
         "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
         "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],
         "s4_signal"              : per_strat["S4"]["bias"], "s4_driver": per_strat["S4"]["driver"],

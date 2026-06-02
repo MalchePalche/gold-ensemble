@@ -865,6 +865,7 @@ else:
     pcr_oi = float(positioning["pcr_oi"])
     pcr_vol = float(positioning["pcr_vol"])
     opt_score = float(positioning.get("score", 0) or 0)
+    iv_skew = float(positioning.get("iv_skew", 0) or 0)
 
     def _pcr_cls(pcr: float) -> str:
         # Low PCR = more calls = bullish (green); high PCR = bearish (red).
@@ -877,10 +878,14 @@ else:
     score_cls = ("metric-positive" if opt_score > 0
                  else "metric-negative" if opt_score < 0 else "metric-neutral")
 
-    # Three metric cards: OI PCR, Volume PCR, net positioning score.
+    # IV skew: positive = put premium = fear (bearish) → red; negative → green.
+    skew_cls = ("metric-negative" if iv_skew > 0.05
+                else "metric-positive" if iv_skew < -0.05 else "metric-neutral")
+
+    # Four metric cards: OI PCR, Volume PCR, net positioning score, IV skew.
     st.markdown(
         f"""
-<div class="metric-grid" style="grid-template-columns: repeat(3, 1fr);">
+<div class="metric-grid">
   <div class="metric-card">
     <div class="metric-label">OI Put/Call</div>
     <div class="metric-value {_pcr_cls(pcr_oi)}">{pcr_oi:.2f}</div>
@@ -893,8 +898,17 @@ else:
     <div class="metric-label">Net positioning</div>
     <div class="metric-value {score_cls}">{opt_score:+.2f}</div>
   </div>
+  <div class="metric-card">
+    <div class="metric-label">IV Skew (puts−calls)</div>
+    <div class="metric-value {skew_cls}">{iv_skew:+.3f}</div>
+  </div>
 </div>
 """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div style='color:#555;font-size:0.72rem;margin:-0.5rem 0 0.75rem 0;'>"
+        "Positive IV skew = put buyers paying premium = fear</div>",
         unsafe_allow_html=True,
     )
 

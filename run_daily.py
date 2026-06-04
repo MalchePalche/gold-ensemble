@@ -396,8 +396,36 @@ def main() -> None:
     except Exception as e:
         print(f"\n  Central bank data unavailable: {e}")
 
+    # ── COT positioning (CFTC gold futures) ─────────────────────────────────
+    cot_signal = None
+    cot_positioning = None
+    cot_adj = 0.0
+    cot_percentile = None
+    try:
+        from data.cot import get_cot_analysis
+        cot = get_cot_analysis(bias_str)
+        cot_an = cot["analysis"]
+        cot_adj_d = cot["adjustment"]
+        if cot.get("error"):
+            print(f"\n  COT data unavailable: {cot['error']}")
+        else:
+            cot_signal      = cot_an["signal"]
+            cot_positioning = cot_an["positioning"]
+            cot_adj         = float(cot_adj_d.get("adjustment", 0) or 0)
+            cot_percentile  = cot_an["percentile"]
+            confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + cot_adj))
+            print(f"\n  COT positioning: {cot_positioning} "
+                  f"(commercials net {cot_an['commercial_net']:+,})")
+            if cot_percentile is not None:
+                print(f"  Percentile rank: {cot_percentile:.0%} of 3yr range")
+            print(f"  COT adjustment: {cot_adj:+.1f}%  "
+                  f"(running confidence -> {confidence_adjusted:.1f}%)")
+            print(f"  {cot_an.get('summary', '')}")
+    except Exception as e:
+        print(f"\n  COT data unavailable: {e}")
+
     # Fold the IV/RV fear-premium adjustment into the running confidence, on top
-    # of the options + CB adjustments already applied above.
+    # of the options + CB + COT adjustments already applied above.
     confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + iv_rv_adj))
 
     # ── 8. Change flags (folded into the daily brief, no longer gate it) ────
@@ -424,6 +452,10 @@ def main() -> None:
         "cb_adjustment"          : round(cb_adj, 1),
         "cb_buyer_count"         : cb_buyer_count,
         "cb_seller_count"        : cb_seller_count,
+        "cot_signal"             : cot_signal,
+        "cot_positioning"        : cot_positioning,
+        "cot_adj"                : round(cot_adj, 1),
+        "cot_percentile"         : round(cot_percentile, 3) if cot_percentile is not None else None,
         "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
         "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],
         "s4_signal"              : per_strat["S4"]["bias"], "s4_driver": per_strat["S4"]["driver"],
@@ -511,11 +543,14 @@ def main() -> None:
         f"Sentiment: {sentiment_line}",
         f"Options: {options_line}",
         f"CB trend: {cb_trend if cb_trend else 'n/a'}",
+        (f"COT: {cot_positioning if cot_positioning else 'n/a'} "
+         f"({cot_percentile:.0%} pct)" if cot_percentile is not None else "COT: n/a"),
         f"Calendar: {cal_line}",
         "",
         "📈 Confidence",
         f"Base: {today_conf:.0f}% → Adjusted: {confidence_adjusted:.0f}%",
-        f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}% | IV/RV: {iv_rv_adj:+.1f}%",
+        f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}% | "
+        f"IV/RV: {iv_rv_adj:+.1f}% | COT: {cot_adj:+.1f}%",
     ]
 
     if bias_flip:

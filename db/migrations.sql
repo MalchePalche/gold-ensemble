@@ -52,3 +52,11 @@ ALTER TABLE signals
   ADD COLUMN IF NOT EXISTS evaluated boolean DEFAULT false,
   ADD COLUMN IF NOT EXISTS correct boolean,
   ADD COLUMN IF NOT EXISTS evaluation_date date;
+
+
+-- ── Migration: COT (CFTC commitment of traders) layer (run in Supabase SQL editor) ──
+-- Adds the gold-futures COT positioning columns written by run_daily.py. Safe to re-run.
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_signal TEXT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_positioning TEXT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_adj NUMERIC;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_percentile NUMERIC;

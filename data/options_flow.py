@@ -180,49 +180,21 @@ def analyze_positioning(chain_data: dict) -> dict:
 
 def get_current_iv() -> float | None:
     """
-    Returns the current at-the-money implied vol for GLD as an
-    annualized float (e.g. 0.18 = 18%). Returns None on failure.
+    Returns current GLD implied volatility as annualized float (e.g. 0.18 = 18%).
+    Source: CBOE Gold ETF Volatility Index (^GVZ) via yfinance.
+    GVZ is quoted as a percentage (e.g. 18.5), divide by 100 to get float.
+    Returns None on any failure.
     """
     try:
-        # Use the nearest expiry ATM options chain already fetched
-        # Extract avg of ATM call IV + ATM put IV, annualized
-        # Return as float in [0, 1] range (e.g. 0.18 not 18.0)
-        t = yf.Ticker(GLD_TICKER)
-        expirations = t.options
-        if not expirations:
-            return None
-
-        # Current GLD spot — most recent close.
-        hist = t.history(period="1d")
+        import yfinance as yf
+        gvz = yf.Ticker("^GVZ")
+        hist = gvz.history(period="5d")
         if hist.empty:
             return None
-        spot = float(hist["Close"].iloc[-1])
-
-        # Nearest expiry chain (most liquid).
-        chain = t.option_chain(expirations[0])
-        calls = chain.calls[["strike", "impliedVolatility"]].dropna()
-        puts = chain.puts[["strike", "impliedVolatility"]].dropna()
-        # Drop zero/invalid IV quotes — yfinance frequently reports 0 IV on the
-        # exact ATM strike and illiquid contracts, which would skew the average.
-        calls = calls[calls["impliedVolatility"] > 0]
-        puts = puts[puts["impliedVolatility"] > 0]
-        if calls.empty or puts.empty:
+        latest = float(hist["Close"].dropna().iloc[-1])
+        if latest <= 0 or latest > 150:  # sanity check
             return None
-
-        # ATM = strike closest to current GLD price (among valid-IV quotes).
-        atm_call_iv = float(
-            calls.iloc[(calls["strike"] - spot).abs().argmin()]["impliedVolatility"])
-        atm_put_iv = float(
-            puts.iloc[(puts["strike"] - spot).abs().argmin()]["impliedVolatility"])
-
-        # yfinance reports IV already annualized as a fraction (e.g. 0.18).
-        iv = (atm_call_iv + atm_put_iv) / 2.0
-        # Plausibility guard: a real GLD ATM IV is never below ~3% (nor absurdly
-        # high). Out-of-range values are stale/garbage quotes from the free feed,
-        # so treat them as unavailable rather than emit a misleading signal.
-        if not (0.03 <= iv <= 5.0):
-            return None
-        return round(iv, 4)
+        return round(latest / 100.0, 4)  # e.g. 18.5 -> 0.185
     except Exception:
         return None
 

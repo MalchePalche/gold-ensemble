@@ -202,10 +202,14 @@ def get_current_iv() -> float | None:
         chain = t.option_chain(expirations[0])
         calls = chain.calls[["strike", "impliedVolatility"]].dropna()
         puts = chain.puts[["strike", "impliedVolatility"]].dropna()
+        # Drop zero/invalid IV quotes — yfinance frequently reports 0 IV on the
+        # exact ATM strike and illiquid contracts, which would skew the average.
+        calls = calls[calls["impliedVolatility"] > 0]
+        puts = puts[puts["impliedVolatility"] > 0]
         if calls.empty or puts.empty:
             return None
 
-        # ATM = strike closest to current GLD price.
+        # ATM = strike closest to current GLD price (among valid-IV quotes).
         atm_call_iv = float(
             calls.iloc[(calls["strike"] - spot).abs().argmin()]["impliedVolatility"])
         atm_put_iv = float(
@@ -213,7 +217,10 @@ def get_current_iv() -> float | None:
 
         # yfinance reports IV already annualized as a fraction (e.g. 0.18).
         iv = (atm_call_iv + atm_put_iv) / 2.0
-        if iv <= 0 or iv > 5:  # sanity guard against bad/garbage quotes
+        # Plausibility guard: a real GLD ATM IV is never below ~3% (nor absurdly
+        # high). Out-of-range values are stale/garbage quotes from the free feed,
+        # so treat them as unavailable rather than emit a misleading signal.
+        if not (0.03 <= iv <= 5.0):
             return None
         return round(iv, 4)
     except Exception:

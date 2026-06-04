@@ -139,6 +139,16 @@ This runs every 5 minutes from 16:25–23:25 Sofia time.
 Alerts only fire when the intraday signal STATE changes.
 Silent when signal is unchanged.
 
+### Intraday London Session Alerts (every 5 minutes)
+- Trigger: Daily, repeat every 5 minutes
+- Start: 09:00 Sofia time, Stop after: 4 hours
+- Action: python run_intraday_alerts_london.py
+- Fires on signal state change only, silent otherwise
+
+Gold moves most during the London open and the London/NY overlap, so this
+covers the morning window the NY task misses. Uses a separate state file
+(`intraday_state_london.json`) so it never cross-triggers the NY run.
+
 ## Signal output — results/signals.csv
 
 | Column         | Description                                      |

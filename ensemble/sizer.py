@@ -24,6 +24,25 @@ def _wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     return tr.ewm(alpha=1.0 / period, adjust=False).mean()
 
 
+def _iv_rv_spread(iv: float | None, rv: float | None) -> dict:
+    """
+    Returns spread signal when IV > RV by meaningful margin.
+    spread > 0.05 (5pp annualized) = elevated fear premium
+    spread > 0.15 = extreme fear premium
+    """
+    if iv is None or rv is None:
+        return {"spread": None, "signal": "NEUTRAL", "adjustment": 0.0}
+    spread = iv - rv
+    if spread > 0.15:
+        return {"spread": round(spread, 4), "signal": "RISK_OFF_EXTREME", "adjustment": -10.0}
+    elif spread > 0.05:
+        return {"spread": round(spread, 4), "signal": "RISK_OFF", "adjustment": -5.0}
+    elif spread < -0.05:
+        return {"spread": round(spread, 4), "signal": "RISK_ON", "adjustment": +5.0}
+    else:
+        return {"spread": round(spread, 4), "signal": "NEUTRAL", "adjustment": 0.0}
+
+
 def compute_vol_regime(
     close: pd.Series,
     high: pd.Series,
@@ -36,10 +55,14 @@ def compute_vol_regime(
     rv_lookback: int = 252,
     rv_high_pct: float = 0.75,
     rv_extreme_pct: float = 0.90,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    implied_vol: float | None = None,   # current IV (from options, annualized)
+    realized_vol: float | None = None,  # current RV (annualized, already computed)
+) -> Tuple[pd.Series, pd.Series, pd.Series, dict]:
     """
-    Returns (regime, atr_ratio, rv_percentile).
+    Returns (regime, atr_ratio, rv_percentile, iv_rv).
     regime values: 'normal' | 'elevated' | 'extreme'
+    iv_rv: IV-vs-RV spread signal (see _iv_rv_spread); NEUTRAL/zero-adjustment
+    when implied_vol or realized_vol is not supplied.
     """
     atr       = _wilder_atr(high, low, close, atr_period)
     avg_atr   = atr.rolling(atr_avg_period).mean()
@@ -56,7 +79,9 @@ def compute_vol_regime(
     regime[is_elevated] = "elevated"
     regime[is_extreme]  = "extreme"
 
-    return regime, atr_ratio, rv_pct
+    iv_rv = _iv_rv_spread(implied_vol, realized_vol)
+
+    return regime, atr_ratio, rv_pct, iv_rv
 
 
 # ── Layer 2: sizing matrix ─────────────────────────────────────────────────

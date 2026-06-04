@@ -69,7 +69,7 @@ def run_once(cfg: Dict[str, Any]) -> None:
     signal = series.signal
     conf   = series.confidence_pct
 
-    vol_regime, atr_ratio, rv_pct = compute_vol_regime(
+    vol_regime, atr_ratio, rv_pct, _iv_rv = compute_vol_regime(
         close, gold["high"], gold["low"]
     )
 

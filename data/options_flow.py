@@ -178,6 +178,48 @@ def analyze_positioning(chain_data: dict) -> dict:
     }
 
 
+def get_current_iv() -> float | None:
+    """
+    Returns the current at-the-money implied vol for GLD as an
+    annualized float (e.g. 0.18 = 18%). Returns None on failure.
+    """
+    try:
+        # Use the nearest expiry ATM options chain already fetched
+        # Extract avg of ATM call IV + ATM put IV, annualized
+        # Return as float in [0, 1] range (e.g. 0.18 not 18.0)
+        t = yf.Ticker(GLD_TICKER)
+        expirations = t.options
+        if not expirations:
+            return None
+
+        # Current GLD spot — most recent close.
+        hist = t.history(period="1d")
+        if hist.empty:
+            return None
+        spot = float(hist["Close"].iloc[-1])
+
+        # Nearest expiry chain (most liquid).
+        chain = t.option_chain(expirations[0])
+        calls = chain.calls[["strike", "impliedVolatility"]].dropna()
+        puts = chain.puts[["strike", "impliedVolatility"]].dropna()
+        if calls.empty or puts.empty:
+            return None
+
+        # ATM = strike closest to current GLD price.
+        atm_call_iv = float(
+            calls.iloc[(calls["strike"] - spot).abs().argmin()]["impliedVolatility"])
+        atm_put_iv = float(
+            puts.iloc[(puts["strike"] - spot).abs().argmin()]["impliedVolatility"])
+
+        # yfinance reports IV already annualized as a fraction (e.g. 0.18).
+        iv = (atm_call_iv + atm_put_iv) / 2.0
+        if iv <= 0 or iv > 5:  # sanity guard against bad/garbage quotes
+            return None
+        return round(iv, 4)
+    except Exception:
+        return None
+
+
 def get_confidence_adjustment(options_signal: str,
                               ensemble_bias: str,
                               options_score: float) -> dict:

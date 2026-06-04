@@ -162,7 +162,13 @@ def main() -> None:
 
     # ── 3. Vol regime ──────────────────────────────────────────────────────
     print("[run_daily] Computing volatility regime…")
-    vol_regime, atr_ratio, rv_pct = compute_vol_regime(
+    # Implied vol from the GLD options chain + annualized realized vol, so the
+    # regime layer can flag an IV>>RV fear premium (risk-off lean). Both degrade
+    # to None/neutral if the options chain is unavailable.
+    from data.options_flow import get_current_iv
+    current_iv = get_current_iv()
+    rv_annualized = float(close.pct_change().rolling(20).std().iloc[-1]) * (252 ** 0.5)
+    vol_regime, atr_ratio, rv_pct, iv_rv = compute_vol_regime(
         close, gold["high"], gold["low"],
         atr_period        = vol_cfg.get("atr_period",        14),
         atr_avg_period    = vol_cfg.get("atr_avg_period",    20),
@@ -172,7 +178,10 @@ def main() -> None:
         rv_lookback       = vol_cfg.get("rv_lookback",       252),
         rv_high_pct       = vol_cfg.get("rv_high_pct",       0.75),
         rv_extreme_pct    = vol_cfg.get("rv_extreme_pct",    0.90),
+        implied_vol       = current_iv,
+        realized_vol      = rv_annualized,
     )
+    iv_rv_adj = iv_rv["adjustment"]
 
     # ── 4. V4 simulation (determines CB state + smoothed position) ─────────
     print("[run_daily] Running V4 simulation…")
@@ -246,6 +255,10 @@ def main() -> None:
     print(f"  {'Confidence':<22} {today_conf:.1f}%")
     print(f"  {'Vol regime':<22} {today_vol.upper()}"
           f"  (ATR {today_atr:.2f}x  RV {today_rv:.0%})")
+    if iv_rv["signal"] != "NEUTRAL":
+        print(f"  IV/RV spread: {iv_rv['signal']} "
+              f"(IV {current_iv:.1%} vs RV {rv_annualized:.1%}, "
+              f"spread {iv_rv['spread']:+.1%}) → {iv_rv_adj:+.1f}% conf adj")
     print(f"  {'Matrix target':<22} {today_matrix}x")
     print(f"  {'Position (V4)':<22} {today_pos:.2f}x"
           f"{'  [CB ACTIVE]' if cb_active else ''}")
@@ -383,6 +396,10 @@ def main() -> None:
     except Exception as e:
         print(f"\n  Central bank data unavailable: {e}")
 
+    # Fold the IV/RV fear-premium adjustment into the running confidence, on top
+    # of the options + CB adjustments already applied above.
+    confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + iv_rv_adj))
+
     # ── 8. Change flags (folded into the daily brief, no longer gate it) ────
     corr_alert = corr_summary == "BREAKDOWN"
 
@@ -498,7 +515,7 @@ def main() -> None:
         "",
         "📈 Confidence",
         f"Base: {today_conf:.0f}% → Adjusted: {confidence_adjusted:.0f}%",
-        f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}%",
+        f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}% | IV/RV: {iv_rv_adj:+.1f}%",
     ]
 
     if bias_flip:

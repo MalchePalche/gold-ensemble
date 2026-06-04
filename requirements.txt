@@ -11,3 +11,5 @@ python-dotenv
 streamlit-autorefresh
 pytz
 textblob
+transformers>=4.40.0
+torch>=2.0.0

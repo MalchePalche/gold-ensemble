@@ -2,10 +2,12 @@
 data/sentiment.py — news sentiment analysis for gold.
 
 Pulls gold-relevant headlines from NewsAPI (last 48h), filters them down to
-genuine gold-commodity stories, scores each with TextBlob polarity weighted by
-relevance, and rolls them into a BULLISH/BEARISH/NEUTRAL sentiment signal. Also
-flags divergence between news sentiment and the ensemble bias — a high-value
-tell that price may reverse within a few days.
+genuine gold-commodity stories, scores each with FinBERT (a finance-tuned BERT)
+polarity weighted by relevance, and rolls them into a BULLISH/BEARISH/NEUTRAL
+sentiment signal. Falls back to TextBlob polarity if `transformers` is not
+installed, so the system never hard-crashes. Also flags divergence between news
+sentiment and the ensemble bias — a high-value tell that price may reverse
+within a few days.
 
 Requires the NEWSAPI_KEY environment variable. If it is missing or the call
 fails, every entry point degrades gracefully to an empty/neutral result.
@@ -19,7 +21,52 @@ from datetime import datetime, timedelta
 import requests
 from textblob import TextBlob
 
+# FinBERT (finance-tuned BERT) is the primary scorer. Import only the pipeline
+# factory at module level so a missing `transformers` install degrades to the
+# TextBlob fallback instead of hard-crashing the runner. The heavy part — the
+# ~400MB model download/load — stays lazy in _get_finbert().
+try:
+    from transformers import pipeline as hf_pipeline
+    FINBERT_AVAILABLE = True
+except ImportError:
+    FINBERT_AVAILABLE = False
+
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+
+# Module-level cache for the loaded FinBERT pipeline (loaded once, on first use).
+_finbert = None
+
+
+def _get_finbert():
+    """Lazily build and cache the FinBERT text-classification pipeline."""
+    global _finbert
+    if _finbert is None:
+        _finbert = hf_pipeline(
+            "text-classification",
+            model="ProsusAI/finbert",
+            tokenizer="ProsusAI/finbert",
+            top_k=None,
+            device=-1,  # CPU; no GPU required
+        )
+    return _finbert
+
+
+def _score_finbert(text: str) -> float:
+    """Return a polarity float in [-1, +1] for `text`.
+
+    Uses FinBERT when available (positive_score - negative_score); otherwise
+    falls back to TextBlob polarity. Any runtime failure degrades to neutral
+    (0.0) so a single bad headline never breaks the whole scoring pass.
+    """
+    if not FINBERT_AVAILABLE:
+        return TextBlob(text).sentiment.polarity
+    try:
+        results = _get_finbert()(text[:512])  # FinBERT max 512 tokens
+        # results is a list of [{"label": ..., "score": ...}]
+        scores = {r["label"].lower(): r["score"] for r in results[0]}
+        return scores.get("positive", 0.0) - scores.get("negative", 0.0)
+    except Exception:
+        return 0.0  # graceful fallback to neutral
 
 # Commodity-context keywords. A headline must contain at least one of these to
 # count as gold-relevant; the more it contains, the higher its relevance weight.
@@ -155,8 +202,9 @@ def _neutral_result(raw_count: int = 0) -> dict:
 
 def score_sentiment(headlines: list[dict]) -> dict:
     """
-    Filter headlines to gold-commodity stories, then score each with TextBlob
-    polarity weighted by relevance. Polarity: -1.0 (very negative) to +1.0.
+    Filter headlines to gold-commodity stories, then score each with FinBERT
+    polarity (TextBlob fallback) weighted by relevance. Polarity: -1.0 (very
+    negative) to +1.0.
 
     Returns a dict with avg_polarity (relevance-weighted), signal, confidence,
     per-sentiment counts, the scored headlines (each with a relevance score),
@@ -173,8 +221,7 @@ def score_sentiment(headlines: list[dict]) -> dict:
     # 2. Score + relevance-weight each headline.
     scores = []
     for h in headlines:
-        blob = TextBlob(h["text"])
-        polarity = blob.sentiment.polarity
+        polarity = _score_finbert(h["text"])
         weight = relevance_score(h)
         scores.append({
             **h,

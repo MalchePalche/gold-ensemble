@@ -334,6 +334,225 @@ def compute_stats_from_db(df: pd.DataFrame) -> dict:
                                pending_count=0)
 
 
+def _empty_confidence_buckets() -> list[dict]:
+    """A zero-data confidence-bucket list (one entry per bucket)."""
+    return [
+        {"bucket": name, "count": 0, "win_rate": None, "avg_return": None}
+        for name in ("low", "mid", "high")
+    ]
+
+
+def _compute_confidence_buckets(eval_df: pd.DataFrame) -> list[dict]:
+    """Group evaluated signals by confidence band and score each band.
+
+    Bands: low (<45%), mid (45–60% inclusive), high (>60%). Per band we report
+    count, win_rate (%) and avg_return (% — `next_day_return` is already stored
+    in percentage points). A band with no signals comes back as
+    count=0 / win_rate=None / avg_return=None so the shape is always stable.
+    """
+    if eval_df.empty:
+        return _empty_confidence_buckets()
+
+    df = eval_df.copy()
+    df["confidence"] = df["confidence"].fillna(0).astype(float)
+    df["correct"] = df["correct"].astype(bool)
+    df["next_day_return"] = df["next_day_return"].astype(float)
+
+    band_masks = [
+        ("low", df["confidence"] < 45),
+        ("mid", (df["confidence"] >= 45) & (df["confidence"] <= 60)),
+        ("high", df["confidence"] > 60),
+    ]
+
+    out = []
+    for name, mask in band_masks:
+        bucket = df[mask]
+        if len(bucket) == 0:
+            out.append({"bucket": name, "count": 0,
+                        "win_rate": None, "avg_return": None})
+        else:
+            out.append({
+                "bucket": name,
+                "count": int(len(bucket)),
+                "win_rate": round(bucket["correct"].sum() / len(bucket) * 100, 1),
+                "avg_return": round(float(bucket["next_day_return"].mean()), 3),
+            })
+    return out
+
+
+def _compute_strategy_accuracy() -> dict:
+    """Per-strategy hit rate when a strategy agreed with the ensemble bias.
+
+    For each of S1/S2/S4/S5 we pull the evaluated rows where that strategy's
+    stored signal matched the ensemble `bias`, then report count, win_rate (%)
+    and avg_return (%). Each strategy is queried independently so that a missing
+    column degrades to None for just that strategy rather than wiping the lot.
+    """
+    from db.supabase_client import supabase
+
+    columns = {
+        "S1": "s1_signal",
+        "S2": "s2_signal",
+        "S4": "s4_signal",
+        "S5": "s5_signal",
+    }
+
+    result: dict = {}
+    for label, col in columns.items():
+        try:
+            res = (
+                supabase.table("signals")
+                .select(f"{col}, bias, correct, next_day_return")
+                .eq("evaluated", True)
+                .execute()
+            )
+            rows = res.data or []
+            matched = [
+                r for r in rows
+                if r.get(col) is not None
+                and r.get(col) == r.get("bias")
+                and r.get("correct") is not None
+                and r.get("next_day_return") is not None
+            ]
+            count = len(matched)
+            if count == 0:
+                result[label] = {"count": 0, "win_rate": None,
+                                 "avg_return": None}
+            else:
+                wins = sum(1 for r in matched if r["correct"])
+                avg_ret = sum(float(r["next_day_return"])
+                              for r in matched) / count
+                result[label] = {
+                    "count": count,
+                    "win_rate": round(wins / count * 100, 1),
+                    "avg_return": round(avg_ret, 3),
+                }
+        except Exception:
+            # Column missing (or any query error) — degrade gracefully.
+            result[label] = None
+    return result
+
+
+def get_signal_duration_stats(supabase_client) -> dict:
+    """Run-length analytics: how long the system holds a bias and how those
+    runs perform.
+
+    Walks every stored signal in date order, groups consecutive days that share
+    the same bias into "runs" (e.g. four BULLISH days in a row = duration 4),
+    and records each completed run's bias, duration and the next-day return of
+    its last bar. Only runs whose last bar has been evaluated (non-null
+    next_day_return) are counted.
+
+    Returns:
+        {
+          "avg_duration": {"BULLISH": X, "BEARISH": Y, "NEUTRAL": Z},
+          "by_duration_bucket": {
+              "short_1_2":   {"count": N, "win_rate": X},
+              "medium_3_5":  {"count": N, "win_rate": X},
+              "long_6_plus": {"count": N, "win_rate": X},
+          },
+        }
+
+    NEUTRAL is an abstain everywhere else in the forward test, so it carries an
+    avg_duration but is excluded from the directional win-rate buckets.
+    """
+    from collections import defaultdict
+
+    empty = {
+        "avg_duration": {"BULLISH": None, "BEARISH": None, "NEUTRAL": None},
+        "by_duration_bucket": {
+            "short_1_2": {"count": 0, "win_rate": None},
+            "medium_3_5": {"count": 0, "win_rate": None},
+            "long_6_plus": {"count": 0, "win_rate": None},
+        },
+    }
+
+    try:
+        res = (
+            supabase_client.table("signals")
+            .select("date, bias, next_day_return")
+            .order("date", desc=False)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception:
+        return empty
+
+    if not rows:
+        return empty
+
+    # ── Collapse consecutive same-bias days into runs ───────────────────────
+    runs: list[dict] = []
+    cur_bias = None
+    cur_len = 0
+    cur_last_ret = None
+    for r in rows:
+        bias = r.get("bias")
+        if bias == cur_bias:
+            cur_len += 1
+            cur_last_ret = r.get("next_day_return")
+        else:
+            if cur_bias is not None:
+                runs.append({"bias": cur_bias, "duration": cur_len,
+                             "next_day_return": cur_last_ret})
+            cur_bias = bias
+            cur_len = 1
+            cur_last_ret = r.get("next_day_return")
+    if cur_bias is not None:
+        runs.append({"bias": cur_bias, "duration": cur_len,
+                     "next_day_return": cur_last_ret})
+
+    # Keep only evaluated runs (last bar has a recorded next-day return).
+    runs = [r for r in runs if r["next_day_return"] is not None]
+    if not runs:
+        return empty
+
+    # ── Average duration per bias ───────────────────────────────────────────
+    durations = defaultdict(list)
+    for r in runs:
+        durations[r["bias"]].append(r["duration"])
+
+    avg_duration = {}
+    for bias in ("BULLISH", "BEARISH", "NEUTRAL"):
+        vals = durations.get(bias, [])
+        avg_duration[bias] = (round(sum(vals) / len(vals), 2)
+                              if vals else None)
+
+    # ── Win rate by duration bucket (directional runs only) ─────────────────
+    buckets: dict[str, list[bool]] = {
+        "short_1_2": [],
+        "medium_3_5": [],
+        "long_6_plus": [],
+    }
+    for r in runs:
+        if r["bias"] not in ("BULLISH", "BEARISH"):
+            continue  # NEUTRAL abstains — no directional win/loss.
+        d = r["duration"]
+        if d <= 2:
+            key = "short_1_2"
+        elif d <= 5:
+            key = "medium_3_5"
+        else:
+            key = "long_6_plus"
+        ret = float(r["next_day_return"])
+        win = ((r["bias"] == "BULLISH" and ret > 0) or
+               (r["bias"] == "BEARISH" and ret < 0))
+        buckets[key].append(win)
+
+    by_duration_bucket = {}
+    for key, wins in buckets.items():
+        if wins:
+            by_duration_bucket[key] = {
+                "count": len(wins),
+                "win_rate": round(sum(1 for w in wins if w) / len(wins) * 100, 1),
+            }
+        else:
+            by_duration_bucket[key] = {"count": 0, "win_rate": None}
+
+    return {"avg_duration": avg_duration,
+            "by_duration_bucket": by_duration_bucket}
+
+
 def get_forward_test_analysis() -> dict:
     """Main entry point — read evaluated signals from Supabase and summarize.
 
@@ -356,14 +575,25 @@ def get_forward_test_analysis() -> dict:
                                 f"First evaluation tomorrow."),
                 },
                 "eval_df": pd.DataFrame(),
+                "confidence_buckets": _empty_confidence_buckets(),
+                "strategy_accuracy": {"S1": None, "S2": None,
+                                      "S4": None, "S5": None},
             }
 
         eval_df = pd.DataFrame(evaluated)
         stats = compute_stats_from_db(eval_df)
+
+        # New analytics layered on top of the existing stats (additive — the
+        # original keys are untouched).
+        confidence_buckets = _compute_confidence_buckets(eval_df)
+        strategy_accuracy = _compute_strategy_accuracy()
+
         return {
             "stats": stats,
             "eval_df": eval_df,
             "error": None,
+            "confidence_buckets": confidence_buckets,
+            "strategy_accuracy": strategy_accuracy,
         }
     except Exception as e:
         return {

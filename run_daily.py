@@ -89,6 +89,15 @@ def _send_telegram(bot_token: str, chat_id: str, message: str,
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # Force UTF-8 console output before anything prints. Windows defaults stdout
+    # to cp1252, which can't encode the ✓/✗/→ glyphs used below and crashes the
+    # run; rewrap the streams as UTF-8. No-op on already-UTF-8 hosts (Linux,
+    # Railway), so it needs no env-var or Task Scheduler changes.
+    import io
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
     cfg      = _load_config()
     data_cfg = cfg.get("data", {})
     ens_cfg  = cfg.get("ensemble", {})
@@ -418,11 +427,21 @@ def main() -> None:
 
     # Forward-test track record (stored outcomes from Supabase).
     ft_evaluated, ft_win_rate = 0, None
+    ft_buckets: list = []
+    ft_strategy: dict = {}
     try:
-        from data.forward_test import get_forward_test_analysis
-        ft_stats = get_forward_test_analysis().get("stats", {})
+        from data.forward_test import (get_forward_test_analysis,
+                                        get_signal_duration_stats)
+        ft = get_forward_test_analysis()
+        ft_stats = ft.get("stats", {})
         ft_evaluated = ft_stats.get("evaluated", 0) or 0
         ft_win_rate  = ft_stats.get("win_rate")
+        ft_buckets   = ft.get("confidence_buckets", []) or []
+        ft_strategy  = ft.get("strategy_accuracy", {}) or {}
+        # Run-length analytics — computed for the record/console; the brief
+        # summarises only the headline win rate to stay compact.
+        ft_duration = get_signal_duration_stats(supabase)
+        print(f"[run_daily] Signal duration (avg): {ft_duration['avg_duration']}")
     except Exception as e:
         print(f"[run_daily] Forward-test stats unavailable: {e}")
 
@@ -489,8 +508,28 @@ def main() -> None:
     if ft_evaluated < 5 or ft_win_rate is None:
         brief.append("Forward test: Insufficient data")
     else:
-        brief.append(f"Forward test: {ft_evaluated} signals evaluated | "
-                     f"Win rate: {ft_win_rate}%")
+        # Confidence-bucket win rates (low/mid/high).
+        wr_by_bucket = {b["bucket"]: b.get("win_rate") for b in ft_buckets}
+
+        def _wr(v):
+            return f"{v}%" if v is not None else "n/a"
+
+        low_wr  = _wr(wr_by_bucket.get("low"))
+        mid_wr  = _wr(wr_by_bucket.get("mid"))
+        high_wr = _wr(wr_by_bucket.get("high"))
+
+        # Best strategy = highest win rate among S1/S2/S4/S5 with matched signals.
+        best_strategy, best_wr = None, None
+        for name, acc in ft_strategy.items():
+            if acc and acc.get("win_rate") is not None:
+                if best_wr is None or acc["win_rate"] > best_wr:
+                    best_strategy, best_wr = name, acc["win_rate"]
+
+        brief.append(f"📉 Forward Test ({ft_evaluated} signals) | "
+                     f"Win: {ft_win_rate}%")
+        brief.append(f"Conf: low {low_wr} | mid {mid_wr} | high {high_wr}")
+        if best_strategy is not None:
+            brief.append(f"Best strat: {best_strategy} {best_wr}%")
 
     # Plain text (no HTML parse mode) — the brief uses only emoji/box glyphs.
     _send_telegram(bot_token, chat_id, "\n".join(brief), parse_mode=None)

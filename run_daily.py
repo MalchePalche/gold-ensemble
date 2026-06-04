@@ -297,6 +297,14 @@ def main() -> None:
         for v in corr_breaks:
             print(f"  {v['label']}: {v['breakdown_msg']} "
                   f"(30d {v['corr_30d']:+.2f}, 5d {v['corr_5d']:+.2f})")
+        # Structural shifts (30d diverging from the 250d baseline).
+        for v in corr_data.values():
+            ss = v.get("structural_shift", {})
+            if ss.get("shift"):
+                print(f"  {v['label']}: correlation {ss['direction']} vs 250d "
+                      f"baseline (30d {v['corr_30d']:+.2f} / "
+                      f"90d {v['corr_90d']:+.2f} / "
+                      f"250d {v['corr_250d']:+.2f})")
     except Exception as e:
         print(f"\n  Correlation monitor unavailable: {e}")
 

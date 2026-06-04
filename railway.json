@@ -1,7 +1,7 @@
 {
   "build": { "builder": "nixpacks" },
   "deploy": {
-    "startCommand": "streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0",
+    "startCommand": "DISABLE_FINBERT=1 streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0",
     "restartPolicyType": "always"
   }
 }

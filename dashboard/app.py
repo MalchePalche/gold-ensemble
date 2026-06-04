@@ -29,6 +29,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from db.queries import get_latest_signal, get_recent_signals
 
+# ── Railway deploy note ────────────────────────────────────────────────────────
+# Railway env var required: DISABLE_FINBERT=1  (prevents torch/FinBERT OOM)
+# This dashboard only reads precomputed signals from Supabase; it never needs to
+# score headlines itself. Without DISABLE_FINBERT, load_sentiment() pulls in
+# torch + the ~400MB FinBERT model and OOMs the Railway service. The flag is set
+# via railway.json's startCommand; it can also be added under
+# Service → Variables in the Railway UI.
+
 
 # ── page config ─────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="XAU/USD · V4 Ensemble", page_icon="🥇")

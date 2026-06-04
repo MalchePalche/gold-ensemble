@@ -15,21 +15,22 @@ fails, every entry point degrades gracefully to an empty/neutral result.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from datetime import datetime, timedelta
 
 import requests
 from textblob import TextBlob
 
-# FinBERT (finance-tuned BERT) is the primary scorer. Import only the pipeline
-# factory at module level so a missing `transformers` install degrades to the
-# TextBlob fallback instead of hard-crashing the runner. The heavy part — the
-# ~400MB model download/load — stays lazy in _get_finbert().
-try:
-    from transformers import pipeline as hf_pipeline
-    FINBERT_AVAILABLE = True
-except ImportError:
-    FINBERT_AVAILABLE = False
+# FinBERT (finance-tuned BERT) is the primary scorer. We deliberately do NOT
+# import transformers at module level: in the installed version
+# `from transformers import pipeline` eagerly pulls in torch (hundreds of MB),
+# which OOMs memory-constrained deploys like the Railway dashboard. Instead we
+# only *detect* availability here (find_spec does not import the package), and
+# defer the real, torch-loading import to _get_finbert(). A missing transformers
+# install still degrades cleanly to the TextBlob fallback. The heavy part — the
+# ~400MB model download/load — also stays lazy in _get_finbert().
+FINBERT_AVAILABLE = importlib.util.find_spec("transformers") is not None
 
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 
@@ -39,8 +40,17 @@ _finbert = None
 
 def _get_finbert():
     """Lazily build and cache the FinBERT text-classification pipeline."""
+    # Hard opt-out for memory-constrained deploys (e.g. the Railway dashboard,
+    # which only reads precomputed signals from Supabase and never needs to
+    # score headlines). When set, torch/FinBERT is never loaded and
+    # _score_finbert() falls back to neutral (0.0). See dashboard/app.py.
+    if os.getenv("DISABLE_FINBERT", "").lower() in ("1", "true", "yes"):
+        raise RuntimeError("FinBERT disabled via DISABLE_FINBERT env var")
     global _finbert
     if _finbert is None:
+        # Heavy import — this is what pulls in torch (~hundreds of MB). Kept
+        # local so it only happens when we actually load the model.
+        from transformers import pipeline as hf_pipeline
         _finbert = hf_pipeline(
             "text-classification",
             model="ProsusAI/finbert",

@@ -424,6 +424,31 @@ def main() -> None:
     except Exception as e:
         print(f"\n  COT data unavailable: {e}")
 
+    # ── Real yields macro layer (FRED) ──────────────────────────────────────
+    macro_regime = None
+    macro_trend  = None
+    macro_adj    = 0.0
+    macro_real_yield = None
+    try:
+        from data.macro import get_macro_analysis
+        macro = get_macro_analysis(bias_str)
+        macro_an  = macro["analysis"]
+        macro_adj_d = macro["adjustment"]
+        if macro.get("error"):
+            print(f"\n Macro data unavailable: {macro['error']}")
+        else:
+            macro_regime     = macro_an["regime"]
+            macro_trend      = macro_an["trend"]
+            macro_adj        = float(macro_adj_d.get("adjustment", 0) or 0)
+            macro_real_yield = macro_an["real_yield"]
+            confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + macro_adj))
+            print(f"\n Real yields macro: {macro_regime} / {macro_trend}")
+            print(f" {macro_an['summary']}")
+            print(f" Macro adjustment: {macro_adj:+.1f}% "
+                  f"(running confidence → {confidence_adjusted:.1f}%)")
+    except Exception as e:
+        print(f"\n Macro data unavailable: {e}")
+
     # Fold the IV/RV fear-premium adjustment into the running confidence, on top
     # of the options + CB + COT adjustments already applied above.
     confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + iv_rv_adj))
@@ -456,6 +481,10 @@ def main() -> None:
         "cot_positioning"        : cot_positioning,
         "cot_adj"                : round(cot_adj, 1),
         "cot_percentile"         : round(cot_percentile, 3) if cot_percentile is not None else None,
+        "macro_regime"           : macro_regime,
+        "macro_trend"            : macro_trend,
+        "macro_adj"              : round(macro_adj, 1),
+        "macro_real_yield"       : macro_real_yield,
         "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
         "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],
         "s4_signal"              : per_strat["S4"]["bias"], "s4_driver": per_strat["S4"]["driver"],
@@ -545,12 +574,14 @@ def main() -> None:
         f"CB trend: {cb_trend if cb_trend else 'n/a'}",
         (f"COT: {cot_positioning if cot_positioning else 'n/a'} "
          f"({cot_percentile:.0%} pct)" if cot_percentile is not None else "COT: n/a"),
+        (f"Macro: Real yield {macro_real_yield:.2f}% | {macro_regime} / {macro_trend}"
+         if macro_real_yield is not None else "Macro: n/a"),
         f"Calendar: {cal_line}",
         "",
         "📈 Confidence",
         f"Base: {today_conf:.0f}% → Adjusted: {confidence_adjusted:.0f}%",
         f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}% | "
-        f"IV/RV: {iv_rv_adj:+.1f}% | COT: {cot_adj:+.1f}%",
+        f"IV/RV: {iv_rv_adj:+.1f}% | COT: {cot_adj:+.1f}% | Macro: {macro_adj:+.1f}%",
     ]
 
     if bias_flip:

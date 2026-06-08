@@ -60,3 +60,12 @@ ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_signal TEXT;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_positioning TEXT;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_adj NUMERIC;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS cot_percentile NUMERIC;
+
+
+-- ── Migration: real-yields macro layer (run in Supabase SQL editor) ─────────
+-- Adds the FRED real-yield (DFII10 + DGS10 + breakeven + Fed Funds) columns
+-- written by run_daily.py. Safe to re-run.
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_regime TEXT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_trend TEXT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_adj NUMERIC;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_real_yield NUMERIC;

@@ -453,6 +453,41 @@ def main() -> None:
     # of the options + CB + COT adjustments already applied above.
     confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + iv_rv_adj))
 
+    # ── Market regime classifier ─────────────────────────────────────────────
+    market_regime     = "RANGING"
+    regime_adx        = None
+    regime_adj        = 0.0
+    regime_multiplier = 0.6
+    try:
+        from data.regime import classify_regime, get_confidence_adjustment
+        regime_result     = classify_regime(gold)
+        market_regime     = regime_result["regime"]
+        regime_adx        = regime_result["adx"]
+        regime_multiplier = regime_result["weight_multiplier"]
+        regime_adj        = get_confidence_adjustment(market_regime, bias_str)
+        confidence_adjusted = min(100.0, max(0.0, confidence_adjusted + regime_adj))
+
+        adx_str = f"ADX {regime_adx:.1f}" if regime_adx is not None else "ADX n/a"
+        print(f"\n Market regime: {market_regime} ({adx_str})")
+        if regime_result.get("scores"):
+            s = regime_result["scores"]
+            print(f"  Scores → up:{s['trending_up_score']} "
+                  f"dn:{s['trending_dn_score']} range:{s['ranging_score']}")
+        print(f"  Weight multiplier: {regime_multiplier:.1f}x | "
+              f"Regime adj: {regime_adj:+.1f}% "
+              f"(running confidence → {confidence_adjusted:.1f}%)")
+    except Exception as e:
+        print(f"\n Market regime unavailable: {e}")
+
+    # ── Apply the regime weight multiplier to the ensemble signal score ──────
+    # The stored/displayed signal score is dampened by the regime multiplier
+    # (0.6x in RANGING — false signals are common when not trending). The V4
+    # position was already simulated upstream from `signal`/`conf`, so this
+    # multiplier affects the recorded/displayed score, not the position itself
+    # (sizing would require touching ensemble/model.py, intentionally left alone).
+    signal_score = float(series.score.iloc[-1]) * regime_multiplier
+    signal_score = max(-1.0, min(1.0, signal_score))
+
     # ── 8. Change flags (folded into the daily brief, no longer gate it) ────
     corr_alert = corr_summary == "BREAKDOWN"
 
@@ -462,7 +497,7 @@ def main() -> None:
         "price"                  : round(today_close, 2),
         "bias"                   : bias_str,
         "confidence"             : round(today_conf, 2),
-        "signal_score"           : round(float(series.score.iloc[-1]), 4),
+        "signal_score"           : round(signal_score, 4),
         "position_size"          : round(today_pos, 2),
         "vol_regime"             : today_vol,
         "sma_200"                : round(sma_200, 2) if sma_200 is not None else None,
@@ -485,6 +520,10 @@ def main() -> None:
         "macro_trend"            : macro_trend,
         "macro_adj"              : round(macro_adj, 1),
         "macro_real_yield"       : macro_real_yield,
+        "market_regime"          : market_regime,
+        "regime_adx"             : round(regime_adx, 2) if regime_adx is not None else None,
+        "regime_adj"             : round(regime_adj, 1),
+        "regime_multiplier"      : regime_multiplier,
         "s1_signal"              : per_strat["S1"]["bias"], "s1_driver": per_strat["S1"]["driver"],
         "s2_signal"              : per_strat["S2"]["bias"], "s2_driver": per_strat["S2"]["driver"],
         "s4_signal"              : per_strat["S4"]["bias"], "s4_driver": per_strat["S4"]["driver"],
@@ -551,7 +590,7 @@ def main() -> None:
         if options_signal is not None else "n/a"
     )
 
-    score_val = float(series.score.iloc[-1])
+    score_val = signal_score
     brief = [
         f"🥇 GOLD DAILY BRIEF — {today_date}",
         "",
@@ -559,6 +598,8 @@ def main() -> None:
         "━" * 20,
         f"BIAS: {bias_str} {today_conf:.0f}%",
         f"Position: {today_pos:.2f}x | Vol: {today_vol}",
+        (f"Regime: {market_regime} (ADX {regime_adx:.1f})"
+         if regime_adx is not None else f"Regime: {market_regime}"),
         f"Signal score: {score_val:+.3f}",
         "",
         "📊 Strategies",
@@ -581,7 +622,8 @@ def main() -> None:
         "📈 Confidence",
         f"Base: {today_conf:.0f}% → Adjusted: {confidence_adjusted:.0f}%",
         f"Options: {options_adj:+.1f}% | CB: {cb_adj:+.1f}% | "
-        f"IV/RV: {iv_rv_adj:+.1f}% | COT: {cot_adj:+.1f}% | Macro: {macro_adj:+.1f}%",
+        f"IV/RV: {iv_rv_adj:+.1f}% | COT: {cot_adj:+.1f}% | "
+        f"Macro: {macro_adj:+.1f}% | Regime: {regime_adj:+.1f}%",
     ]
 
     if bias_flip:

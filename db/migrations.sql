@@ -69,3 +69,13 @@ ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_regime TEXT;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_trend TEXT;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_adj NUMERIC;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS macro_real_yield NUMERIC;
+
+
+-- ── Migration: market regime classifier layer (run in Supabase SQL editor) ──
+-- Adds the ADX-based market-regime columns written by run_daily.py
+-- (regime state, ADX, confidence adjustment, ensemble weight multiplier).
+-- Safe to re-run.
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS market_regime TEXT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS regime_adx NUMERIC;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS regime_adj NUMERIC;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS regime_multiplier NUMERIC;
